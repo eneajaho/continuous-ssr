@@ -15,8 +15,10 @@ import {
   ɵrenderInternal as renderInternal,
 } from '@angular/platform-server';
 import { Router } from '@angular/router';
+import { keepHttpTransferCacheActive } from './http-transfer-cache';
 import { Logger, NOOP_LOGGER, kb, ms } from './log';
 import { stripSerializationArtifacts } from './serialization-artifacts';
+import { TransferStateScope, TransferStateStore, storeOf } from './transfer-state-scope';
 
 export type ContinuousBootstrap = (context: BootstrapContext) => Promise<ApplicationRef>;
 
@@ -30,6 +32,11 @@ export interface ContinuousRendererOptions {
   readonly platformProviders?: readonly StaticProvider[];
   /** Value of the `ng-server-context` attribute on the root element. */
   readonly serverContext?: string;
+  /**
+   * `TransferState` keys that belong to every snapshot, such as app-wide state a root service
+   * mirrors into the store. Everything else is attributed to the route that wrote it.
+   */
+  readonly sharedStateKeys?: readonly string[];
   readonly log?: Logger;
 }
 
@@ -47,6 +54,7 @@ export class ContinuousRenderer {
     private readonly platformRef: PlatformRef,
     private readonly appRef: ApplicationRef,
     private readonly origin: string,
+    private readonly scope: TransferStateScope,
     private readonly log: Logger,
   ) {}
 
@@ -71,7 +79,21 @@ export class ContinuousRenderer {
         took: ms(performance.now() - bootstrapped),
         components: appRef.components.length,
       });
-      return new ContinuousRenderer(platformRef, appRef, new URL(options.url).origin, log);
+
+      // Whatever the initial navigation wrote into TransferState belongs to the initial route.
+      const scope = new TransferStateScope(options.sharedStateKeys);
+      const initial = new URL(options.url);
+      const transferState = appRef.injector.get(TransferState, null);
+      if (transferState) {
+        const written = scope.attribute(
+          storeOf(transferState),
+          {},
+          `${initial.pathname}${initial.search}${initial.hash}`,
+        );
+        log.debug('transfer state attributed to the initial route', { keys: written.join(',') });
+      }
+
+      return new ContinuousRenderer(platformRef, appRef, initial.origin, scope, log);
     } catch (error) {
       log.error('bootstrap failed, destroying platform', undefined, error);
       platformRef.destroy();
@@ -125,23 +147,36 @@ export class ContinuousRenderer {
     const started = performance.now();
     const injector = this.appRef.injector;
     const router = injector.get(Router, null);
+    const transferState = injector.get(TransferState, null);
+    const store = transferState ? storeOf(transferState) : undefined;
+    const target = new URL(url, this.origin);
+    const route = `${target.pathname}${target.search}${target.hash}`;
     let navigation: string | undefined;
+    let evicted: string[] = [];
+    let before: TransferStateStore = {};
+    // Angular switches the HTTP transfer cache off after the first stabilization; this app
+    // keeps rendering, so responses fetched from here on must still reach TransferState.
+    const httpCache = keepHttpTransferCacheActive(injector);
 
-    if (router) {
-      const target = new URL(url, this.origin);
-      const path = `${target.pathname}${target.search}${target.hash}`;
-      if (router.url !== path) {
-        const from = router.url;
-        const navigated = await router.navigateByUrl(path);
-        if (!navigated) {
-          this.log.warn('navigation rejected', { from, to: path });
-          throw new Error(`Navigation to ${path} was rejected.`);
-        }
-        navigation = `${from}->${path}`;
-        this.log.debug('navigated live router', { from, to: path, took: ms(performance.now() - started) });
+    if (router && router.url !== route) {
+      const from = router.url;
+      // The route's components are about to be re-created; drop what they wrote last time so
+      // they fetch fresh data instead of being answered from the transfer cache.
+      evicted = store ? this.scope.evict(store, route) : [];
+      // Everything written from here on, navigation included, belongs to this route.
+      before = store ? this.scope.capture(store) : {};
+      const navigated = await router.navigateByUrl(route);
+      if (!navigated) {
+        this.log.warn('navigation rejected', { from, to: route });
+        throw new Error(`Navigation to ${route} was rejected.`);
       }
+      navigation = `${from}->${route}`;
+      this.log.debug('navigated live router', { from, to: route, took: ms(performance.now() - started) });
     }
 
+    if (!navigation) {
+      before = store ? this.scope.capture(store) : {};
+    }
     const stripped = stripSerializationArtifacts(injector.get(DOCUMENT), injector.get(APP_ID));
     if (stripped.stateScript || stripped.markerComments || stripped.replayScripts) {
       this.log.debug('stripped previous serialization artifacts', {
@@ -155,7 +190,18 @@ export class ContinuousRenderer {
     await this.appRef.whenStable();
     const stable = performance.now();
 
-    const html = await renderInternal(this.platformRef, this.appRef);
+    const written = store ? this.scope.attribute(store, before, route) : [];
+    const withheld = store ? this.scope.withhold(store, route) : {};
+    let html: string;
+    let serializedKeys: string[] = [];
+    try {
+      html = await renderInternal(this.platformRef, this.appRef);
+      serializedKeys = store ? Object.keys(store) : [];
+    } finally {
+      if (store) {
+        this.scope.restore(store, withheld);
+      }
+    }
     const serialized = performance.now();
     this.renders++;
 
@@ -168,21 +214,17 @@ export class ContinuousRenderer {
       total: ms(serialized - started),
       size: kb(html.length),
     });
-    this.logTransferStateKeys(injector);
+    if (store) {
+      this.log.debug('transfer state scoped', {
+        route,
+        evicted: evicted.length,
+        written: written.length,
+        withheld: Object.keys(withheld).length,
+        httpCache: httpCache ? 'active' : 'absent',
+        serialized: serializedKeys.join(','),
+      });
+    }
 
     return html;
-  }
-
-  private logTransferStateKeys(injector: EnvironmentInjector): void {
-    const transferState = injector.get(TransferState, null);
-    if (!transferState || transferState.isEmpty) {
-      return;
-    }
-    try {
-      const keys = Object.keys(JSON.parse(transferState.toJson()) as Record<string, unknown>);
-      this.log.debug('transfer state serialized', { keys: keys.length, names: keys.join(',') });
-    } catch {
-      // Only diagnostic; never let logging break a render.
-    }
   }
 }

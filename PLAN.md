@@ -45,11 +45,30 @@ Files:
 - `src/server/render-loop.ts` — `refreshAll()` / `invalidate()` with coalescing and a version counter.
 - `src/server.ts` — wires renderer, ticker, `/api/state` endpoints, cache-first request handler, engine fallback.
 - `src/app/live-data.store.ts` — `@Service` store with signals; server writes it into `TransferState`, browser reads it back.
-- `src/app/pages/dashboard.ts`, `src/app/pages/about.ts` — lazy routes; dashboard shows the live state and posts a new message.
+- `src/app/pages/dashboard.ts`, `src/app/pages/news.ts`, `src/app/pages/about.ts` — lazy routes; dashboard shows the live state and posts a new message, news fetches `/api/news` through `httpResource`.
+- `src/server/transfer-state-scope.ts`, `src/server/http-transfer-cache.ts` — per-route transfer state, see below.
 
 Constraints accepted: shared instance = no per-request context (public pages only); one live DOM per
 platform so routes render sequentially; continuous mode runs against the built output (`index.server.html`
 lives next to `server.mjs`), `ng serve` keeps the per-request engine.
+
+## Transfer state per route
+
+`TransferState` is one store per application. Verified in `packages/common/http/src/transfer_cache.ts`:
+
+- keys written by one route stay in the store, so later snapshots of other routes would serialize them;
+- on the server the HTTP transfer cache answers from the store when the key is present, so a
+  long-lived app would never fetch an API again;
+- `withHttpTransferCache` sets `isCacheActive = false` after the first stabilization, so a
+  long-lived app would stop writing responses into the store after startup.
+
+Handling, in `ContinuousRenderer.renderNow` with `TransferStateScope`:
+
+1. `keepHttpTransferCacheActive` re-enables the cache (token recovered from `ɵwithHttpTransferCache`'s providers).
+2. Before navigating to a route, evict the keys that route wrote last time so its components fetch again.
+3. Capture the store, navigate, stabilize, then attribute every new or changed key to the route.
+4. Withhold keys owned by other routes, serialize, restore them. Shared keys, Angular's `__ngh*`
+   keys and keys written between renders stay in every snapshot.
 
 ## Testing
 

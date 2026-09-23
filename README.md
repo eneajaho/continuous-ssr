@@ -19,6 +19,7 @@ Then:
 
 ```sh
 curl -i http://localhost:4000/                 # X-SSR-Mode: continuous, served from the snapshot store
+curl -i http://localhost:4000/news             # snapshot whose transfer state holds only its own API response
 curl -i http://localhost:4000/about/           # X-SSR-Mode: per-request, rendered by the engine
 curl http://localhost:4000/api/state           # live state, snapshot versions
 curl -X POST http://localhost:4000/api/message -H 'content-type: application/json' -d '{"message":"hi"}'
@@ -54,8 +55,9 @@ Every line is `time level [scope] message  key=value ...`. Scopes: `ssr` for the
 ```
 
 `reasons` on a run lists every refresh that was coalesced into it, `rerun=true` means another run
-follows because state changed mid-run, and `transfer state serialized` shows exactly which keys
-went into the page's state script.
+follows because state changed mid-run, and `transfer state scoped` shows how many keys were
+evicted before the route re-rendered, written during it, withheld from other routes, and exactly
+which keys went into the page's state script.
 
 ## How it works
 
@@ -71,6 +73,16 @@ went into the page's state script.
   Angular with the engine.
 - `src/app/live-data.store.ts` is the live state; on the server an effect mirrors it into
   `TransferState`, in the browser the store hydrates from it.
+- `src/server/transfer-state-scope.ts` keeps `TransferState` per route. In a long-lived app the
+  store is shared by every route, so without it the news page's API response would ship inside
+  the dashboard's snapshot, and the server would keep answering from the cached response instead
+  of fetching again. The scope attributes keys to the route that wrote them, evicts a route's
+  own keys before it is re-rendered, and withholds other routes' keys while a snapshot is
+  serialized. Keys in `sharedStateKeys` (the live state) and Angular's own `__ngh*` keys go
+  everywhere; keys written between renders are treated as app-wide too.
+- `src/server/http-transfer-cache.ts` switches Angular's HTTP transfer cache back on before each
+  render. Angular turns it off after the first stabilization, which a per-request app never
+  outlives; this one does.
 
 ## Tests
 

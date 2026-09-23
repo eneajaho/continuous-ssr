@@ -9,7 +9,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import type { LiveDataStore } from './app/live-data.store';
+import type { LIVE_STATE_KEY, LiveDataStore } from './app/live-data.store';
 import type { ContinuousBootstrap, ContinuousRenderer } from './server/continuous-renderer';
 import { createLogger, isLogLevel, kb, ms } from './server/log';
 import { RenderLoop } from './server/render-loop';
@@ -19,7 +19,7 @@ const serverDistFolder = import.meta.dirname;
 const browserDistFolder = join(serverDistFolder, '../browser');
 
 /** Routes that get a continuously refreshed snapshot. Everything else renders per request. */
-const CONTINUOUS_ROUTES = ['/', '/about'] as const;
+const CONTINUOUS_ROUTES = ['/', '/news', '/about'] as const;
 /** Interval of the demo ticker that mutates state on the server. `0` disables it. */
 const TICK_MS = Number(process.env['TICK_MS'] ?? 5000);
 /** Origin the live application believes it runs on. */
@@ -46,6 +46,7 @@ interface ServerEntry {
   readonly default: ContinuousBootstrap;
   readonly ContinuousRenderer: typeof ContinuousRenderer;
   readonly LiveDataStore: typeof LiveDataStore;
+  readonly LIVE_STATE_KEY: typeof LIVE_STATE_KEY;
 }
 
 /**
@@ -87,6 +88,7 @@ export async function startContinuousRendering(): Promise<RenderLoop | undefined
     bootstrap: entry.default,
     document,
     url: `${ORIGIN}/`,
+    sharedStateKeys: [entry.LIVE_STATE_KEY],
     log: log.child('renderer'),
   });
 
@@ -148,6 +150,20 @@ app.get('/api/state', (_req, res) => {
     version: renderLoop?.currentVersion ?? 0,
     state: liveStore?.snapshot() ?? null,
     snapshots: snapshots.summaries(),
+  });
+});
+
+/** The news page fetches this on the server; each call produces a fresh feed. */
+app.get('/api/news', (_req, res) => {
+  const tick = liveStore?.counter() ?? 0;
+  res.json({
+    generatedAt: new Date().toISOString(),
+    tick,
+    items: [
+      { id: 1, title: 'Snapshot cache keeps serving', summary: `Snapshot version ${renderLoop?.currentVersion ?? 0} is live.` },
+      { id: 2, title: 'Live application stays warm', summary: `The store has ticked ${tick} times since start.` },
+      { id: 3, title: 'Transfer state is scoped', summary: 'This feed only travels with the news page.' },
+    ],
   });
 });
 

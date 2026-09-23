@@ -155,3 +155,46 @@ test('paths without a snapshot fall back to per-request rendering', async () => 
   assert.ok(html.includes('<app-about'));
   assert.ok(html.includes('ng-server-context="ssr"'));
 });
+
+function httpCacheEntries(state) {
+  return Object.entries(state).filter(
+    ([key, value]) => !key.startsWith('__ngh') && key !== 'live-state' && value && typeof value === 'object' && 'u' in value,
+  );
+}
+
+test('the news page carries its API response in transfer state and re-fetches on every render', async () => {
+  const first = await fetch(`${BASE}/news`);
+  const firstHtml = await first.text();
+  assert.equal(first.headers.get('x-ssr-mode'), 'continuous');
+  assert.ok(firstHtml.includes('<app-news'));
+  assert.ok(firstHtml.includes('Transfer state is scoped'));
+
+  const entries = httpCacheEntries(transferState(firstHtml));
+  assert.equal(entries.length, 1, 'exactly one cached HTTP response');
+  const [, cached] = entries[0];
+  assert.match(cached.u, /\/api\/news$/);
+  assert.equal(cached.b.items.length, 3);
+  const firstVersion = Number(first.headers.get('x-ssr-version'));
+
+  const later = await waitFor(
+    async () => {
+      const response = await fetch(`${BASE}/news`);
+      return Number(response.headers.get('x-ssr-version')) >= firstVersion + 2 ? await response.text() : null;
+    },
+    { label: 'two newer news snapshots' },
+  );
+  const [, laterCached] = httpCacheEntries(transferState(later))[0];
+  assert.notEqual(laterCached.b.generatedAt, cached.b.generatedAt, 'feed was fetched again');
+});
+
+test('other pages never carry the news API response', async () => {
+  const version = (await state()).version;
+  await waitFor(async () => (await state()).version >= version + 1, { label: 'a run after news rendered' });
+
+  for (const path of ['/', '/about']) {
+    const html = await (await fetch(`${BASE}${path}`)).text();
+    const keys = Object.keys(transferState(html));
+    assert.equal(httpCacheEntries(transferState(html)).length, 0, `${path} has no HTTP cache entry (${keys})`);
+    assert.ok(keys.includes('live-state'), `${path} keeps the shared live state`);
+  }
+});

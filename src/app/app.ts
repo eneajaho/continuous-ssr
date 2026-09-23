@@ -10,6 +10,7 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 export class App {
   protected readonly links = [
     { path: '/', label: 'Dashboard', exact: true },
+    { path: '/news', label: 'News', exact: false },
     { path: '/about', label: 'About', exact: false },
   ] as const;
 }

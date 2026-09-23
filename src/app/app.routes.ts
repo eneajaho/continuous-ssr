@@ -7,6 +7,11 @@ export const routes: Routes = [
     loadComponent: () => import('./pages/dashboard').then((m) => m.DashboardPage),
   },
   {
+    path: 'news',
+    title: 'News · Continuous SSR',
+    loadComponent: () => import('./pages/news').then((m) => m.NewsPage),
+  },
+  {
     path: 'about',
     title: 'About · Continuous SSR',
     loadComponent: () => import('./pages/about').then((m) => m.AboutPage),
