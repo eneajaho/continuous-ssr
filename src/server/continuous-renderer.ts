@@ -5,6 +5,7 @@ import {
   EnvironmentInjector,
   PlatformRef,
   StaticProvider,
+  TransferState,
 } from '@angular/core';
 import type { BootstrapContext } from '@angular/platform-browser';
 import {
@@ -14,6 +15,7 @@ import {
   ɵrenderInternal as renderInternal,
 } from '@angular/platform-server';
 import { Router } from '@angular/router';
+import { Logger, NOOP_LOGGER, kb, ms } from './log';
 import { stripSerializationArtifacts } from './serialization-artifacts';
 
 export type ContinuousBootstrap = (context: BootstrapContext) => Promise<ApplicationRef>;
@@ -28,6 +30,7 @@ export interface ContinuousRendererOptions {
   readonly platformProviders?: readonly StaticProvider[];
   /** Value of the `ng-server-context` attribute on the root element. */
   readonly serverContext?: string;
+  readonly log?: Logger;
 }
 
 /**
@@ -44,9 +47,14 @@ export class ContinuousRenderer {
     private readonly platformRef: PlatformRef,
     private readonly appRef: ApplicationRef,
     private readonly origin: string,
+    private readonly log: Logger,
   ) {}
 
   static async create(options: ContinuousRendererOptions): Promise<ContinuousRenderer> {
+    const log = options.log ?? NOOP_LOGGER;
+    const started = performance.now();
+    log.info('creating server platform', { url: options.url, template: kb(options.document.length) });
+
     const platformRef = platformServer([
       { provide: INITIAL_CONFIG, useValue: { document: options.document, url: options.url } },
       { provide: SERVER_CONTEXT, useValue: options.serverContext ?? 'ssr-continuous' },
@@ -55,9 +63,17 @@ export class ContinuousRenderer {
 
     try {
       const appRef = await options.bootstrap({ platformRef });
+      const bootstrapped = performance.now();
+      log.info('application bootstrapped', { took: ms(bootstrapped - started) });
+
       await appRef.whenStable();
-      return new ContinuousRenderer(platformRef, appRef, new URL(options.url).origin);
+      log.info('application stable, keeping it alive', {
+        took: ms(performance.now() - bootstrapped),
+        components: appRef.components.length,
+      });
+      return new ContinuousRenderer(platformRef, appRef, new URL(options.url).origin, log);
     } catch (error) {
+      log.error('bootstrap failed, destroying platform', undefined, error);
       platformRef.destroy();
       throw error;
     }
@@ -82,13 +98,21 @@ export class ContinuousRenderer {
    * document. Resolves with the full HTML for that route.
    */
   render(url: string): Promise<string> {
-    const run = this.queue.then(() => this.renderNow(url));
+    const queued = performance.now();
+    const run = this.queue.then(() => {
+      const waited = performance.now() - queued;
+      if (waited > 1) {
+        this.log.debug('render dequeued', { url, waited: ms(waited) });
+      }
+      return this.renderNow(url);
+    });
     this.queue = run.catch(() => undefined);
     return run;
   }
 
   destroy(): void {
     if (!this.platformRef.destroyed) {
+      this.log.info('destroying platform', { renders: this.renders });
       this.platformRef.destroy();
     }
   }
@@ -98,24 +122,67 @@ export class ContinuousRenderer {
       throw new Error('ContinuousRenderer has been destroyed.');
     }
 
+    const started = performance.now();
     const injector = this.appRef.injector;
     const router = injector.get(Router, null);
+    let navigation: string | undefined;
+
     if (router) {
       const target = new URL(url, this.origin);
       const path = `${target.pathname}${target.search}${target.hash}`;
       if (router.url !== path) {
+        const from = router.url;
         const navigated = await router.navigateByUrl(path);
         if (!navigated) {
+          this.log.warn('navigation rejected', { from, to: path });
           throw new Error(`Navigation to ${path} was rejected.`);
         }
+        navigation = `${from}->${path}`;
+        this.log.debug('navigated live router', { from, to: path, took: ms(performance.now() - started) });
       }
     }
 
-    stripSerializationArtifacts(injector.get(DOCUMENT), injector.get(APP_ID));
+    const stripped = stripSerializationArtifacts(injector.get(DOCUMENT), injector.get(APP_ID));
+    if (stripped.stateScript || stripped.markerComments || stripped.replayScripts) {
+      this.log.debug('stripped previous serialization artifacts', {
+        stateScript: stripped.stateScript,
+        markerComments: stripped.markerComments,
+        replayScripts: stripped.replayScripts,
+      });
+    }
+
+    const beforeStable = performance.now();
     await this.appRef.whenStable();
+    const stable = performance.now();
 
     const html = await renderInternal(this.platformRef, this.appRef);
+    const serialized = performance.now();
     this.renders++;
+
+    this.log.info('serialized live application', {
+      url,
+      render: this.renders,
+      navigation,
+      stable: ms(stable - beforeStable),
+      serialize: ms(serialized - stable),
+      total: ms(serialized - started),
+      size: kb(html.length),
+    });
+    this.logTransferStateKeys(injector);
+
     return html;
+  }
+
+  private logTransferStateKeys(injector: EnvironmentInjector): void {
+    const transferState = injector.get(TransferState, null);
+    if (!transferState || transferState.isEmpty) {
+      return;
+    }
+    try {
+      const keys = Object.keys(JSON.parse(transferState.toJson()) as Record<string, unknown>);
+      this.log.debug('transfer state serialized', { keys: keys.length, names: keys.join(',') });
+    } catch {
+      // Only diagnostic; never let logging break a render.
+    }
   }
 }

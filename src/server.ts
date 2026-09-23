@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { LiveDataStore } from './app/live-data.store';
 import type { ContinuousBootstrap, ContinuousRenderer } from './server/continuous-renderer';
+import { createLogger, isLogLevel, kb, ms } from './server/log';
 import { RenderLoop } from './server/render-loop';
 import { SnapshotStore } from './server/snapshot-store';
 
@@ -29,7 +30,10 @@ const ALLOWED_HOSTS = (process.env['ALLOWED_HOSTS'] ?? 'localhost')
   .split(',')
   .map((host) => host.trim())
   .filter((host) => host.length > 0);
+/** `SSR_LOG=debug` adds per-step timings, stripped artifacts and transfer-state keys. */
+const LOG_LEVEL = isLogLevel(process.env['SSR_LOG']) ? process.env['SSR_LOG'] : 'info';
 
+const log = createLogger('ssr', LOG_LEVEL);
 const app = express();
 const angularApp = new AngularNodeAppEngine({ allowedHosts: ALLOWED_HOSTS });
 const snapshots = new SnapshotStore();
@@ -51,7 +55,10 @@ interface ServerEntry {
  */
 async function loadServerEntry(): Promise<ServerEntry> {
   const specifier = new URL('./main.server.mjs', import.meta.url).href;
-  return (await import(/* @vite-ignore */ specifier)) as ServerEntry;
+  const started = performance.now();
+  const entry = (await import(/* @vite-ignore */ specifier)) as ServerEntry;
+  log.debug('application bundle loaded', { took: ms(performance.now() - started) });
+  return entry;
 }
 
 /**
@@ -61,17 +68,26 @@ async function loadServerEntry(): Promise<ServerEntry> {
 export async function startContinuousRendering(): Promise<RenderLoop | undefined> {
   const indexPath = join(serverDistFolder, 'index.server.html');
   if (!existsSync(indexPath)) {
-    console.warn(
-      '[continuous-ssr] index.server.html not found next to the server bundle; per-request rendering only.',
-    );
+    log.warn('index.server.html not found next to the server bundle; per-request rendering only', {
+      indexPath,
+    });
     return undefined;
   }
+
+  const started = performance.now();
+  log.info('starting continuous renderer', {
+    routes: CONTINUOUS_ROUTES.join(','),
+    origin: ORIGIN,
+    tickMs: TICK_MS,
+    logLevel: LOG_LEVEL,
+  });
 
   const [document, entry] = await Promise.all([readFile(indexPath, 'utf8'), loadServerEntry()]);
   const renderer = await entry.ContinuousRenderer.create({
     bootstrap: entry.default,
     document,
     url: `${ORIGIN}/`,
+    log: log.child('renderer'),
   });
 
   const store = renderer.injector.get(entry.LiveDataStore);
@@ -80,6 +96,7 @@ export async function startContinuousRendering(): Promise<RenderLoop | undefined
     message: 'Hello from the continuous renderer',
     updatedAt: new Date().toISOString(),
   });
+  log.debug('live state seeded', { ...store.snapshot() });
 
   const criticalCss = new InlineCriticalCssProcessor((path) =>
     readFile(join(browserDistFolder, basename(path)), 'utf8'),
@@ -89,10 +106,19 @@ export async function startContinuousRendering(): Promise<RenderLoop | undefined
     renderer,
     store: snapshots,
     routes: CONTINUOUS_ROUTES,
-    postProcess: (html) => criticalCss.process(html),
-    onError: (error, path) => console.error(`[continuous-ssr] render failed for ${path}`, error),
+    postProcess: async (html, path) => {
+      const before = performance.now();
+      const processed = await criticalCss.process(html);
+      log.debug('critical css inlined', {
+        path,
+        took: ms(performance.now() - before),
+        delta: kb(processed.length - html.length),
+      });
+      return processed;
+    },
+    log: log.child('loop'),
   });
-  await loop.refresh();
+  await loop.refresh('warm-up');
 
   liveStore = store;
   renderLoop = loop;
@@ -100,13 +126,16 @@ export async function startContinuousRendering(): Promise<RenderLoop | undefined
   if (TICK_MS > 0) {
     setInterval(() => {
       store.increment(new Date().toISOString());
-      void loop.refresh();
+      log.debug('tick', { counter: store.counter() });
+      void loop.refresh('tick');
     }, TICK_MS).unref();
   }
 
-  console.log(
-    `[continuous-ssr] live application ready, ${snapshots.size} snapshot(s) at version ${loop.currentVersion}`,
-  );
+  log.info('continuous renderer ready', {
+    snapshots: snapshots.size,
+    version: loop.currentVersion,
+    took: ms(performance.now() - started),
+  });
   return loop;
 }
 
@@ -129,6 +158,7 @@ app.post('/api/message', express.json(), (req, res) => {
       ? body.message.trim()
       : '';
   if (message.length === 0 || message.length > MAX_MESSAGE_LENGTH) {
+    log.warn('rejected message', { length: message.length });
     res.status(400).json({ error: `message must be between 1 and ${MAX_MESSAGE_LENGTH} characters` });
     return;
   }
@@ -137,7 +167,8 @@ app.post('/api/message', express.json(), (req, res) => {
     return;
   }
   liveStore.setMessage(message, new Date().toISOString());
-  void renderLoop.refresh();
+  log.info('live state changed', { source: 'api:message', message });
+  void renderLoop.refresh('api:message');
   res.json(liveStore.snapshot());
 });
 
@@ -147,7 +178,8 @@ app.post('/api/increment', (_req, res) => {
     return;
   }
   liveStore.increment(new Date().toISOString());
-  void renderLoop.refresh();
+  log.info('live state changed', { source: 'api:increment', counter: liveStore.counter() });
+  void renderLoop.refresh('api:increment');
   res.json(liveStore.snapshot());
 });
 
@@ -184,9 +216,17 @@ app.use((req, res, next) => {
   res.setHeader('X-SSR-Rendered-At', snapshot.renderedAt);
 
   if (req.headers['if-none-match'] === snapshot.etag) {
+    log.info('request served', { path: req.path, mode: 'continuous', status: 304, version: snapshot.version });
     res.status(304).end();
     return;
   }
+  log.info('request served', {
+    path: req.path,
+    mode: 'continuous',
+    status: 200,
+    version: snapshot.version,
+    age: ms(Date.now() - Date.parse(snapshot.renderedAt)),
+  });
   res.status(200).send(snapshot.html);
 });
 
@@ -194,13 +234,21 @@ app.use((req, res, next) => {
  * Everything else goes through Angular's per-request engine.
  */
 app.use((req, res, next) => {
+  const started = performance.now();
   angularApp
     .handle(req)
     .then((response) => {
       if (!response) {
+        log.debug('request not handled by angular', { path: req.path, method: req.method });
         next();
         return;
       }
+      log.info('request served', {
+        path: req.path,
+        mode: 'per-request',
+        status: response.status,
+        took: ms(performance.now() - started),
+      });
       res.setHeader('X-SSR-Mode', 'per-request');
       return writeResponseToNodeResponse(response, res);
     })
@@ -217,11 +265,11 @@ if (isMainModule(import.meta.url) || process.env['pm_id']) {
     if (error) {
       throw error;
     }
-    console.log(`Node Express server listening on http://localhost:${port}`);
+    log.info('listening', { url: `http://localhost:${port}` });
   });
 
   startContinuousRendering().catch((error) => {
-    console.error('[continuous-ssr] failed to start the continuous renderer', error);
+    log.error('failed to start the continuous renderer', undefined, error);
   });
 }
 

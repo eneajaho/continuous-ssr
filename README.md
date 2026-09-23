@@ -32,8 +32,30 @@ Environment variables for the built server:
 | `TICK_MS` | `5000` | Demo ticker that increments the counter and re-renders. `0` disables it. |
 | `SSR_ORIGIN` | `http://localhost:$PORT` | Origin the live application believes it runs on |
 | `ALLOWED_HOSTS` | `localhost` | Comma-separated hosts accepted by the per-request engine |
+| `SSR_LOG` | `info` | `debug` adds per-step timings, stripped artifacts and transfer-state keys; `warn` or `silent` quiets it |
 
 `ng serve` keeps the default per-request rendering; the continuous renderer needs the built output.
+
+## Reading the logs
+
+Every line is `time level [scope] message  key=value ...`. Scopes: `ssr` for the Express server,
+`ssr.renderer` for the live application, `ssr.loop` for the render loop.
+
+```
+14:26:21.795 info  [ssr] live state changed  source=api:message message="logged hello"
+14:26:21.795 info  [ssr.loop] render run started  version=2 routes=2 reasons=api:message
+14:26:21.797 debug [ssr.renderer] navigated live router  from=/about to=/ took=2.3ms
+14:26:21.798 debug [ssr.renderer] stripped previous serialization artifacts  stateScript=true markerComments=1 replayScripts=1
+14:26:21.799 info  [ssr.renderer] serialized live application  url=/ render=3 navigation=/about->/ stable=0.9ms serialize=0.4ms total=3.8ms size=7.2kB
+14:26:21.799 debug [ssr.renderer] transfer state serialized  keys=2 names=live-state,__nghData__
+14:26:21.804 info  [ssr.loop] snapshot stored  path=/ version=2 size=15.5kB changed=true took=9.1ms
+14:26:21.826 info  [ssr.loop] render run finished  version=2 snapshots=2 failures=0 took=30.6ms rerun=false
+14:26:21.766 info  [ssr] request served  path=/ mode=continuous status=200 version=1 age=1.89s
+```
+
+`reasons` on a run lists every refresh that was coalesced into it, `rerun=true` means another run
+follows because state changed mid-run, and `transfer state serialized` shows exactly which keys
+went into the page's state script.
 
 ## How it works
 

@@ -18,6 +18,13 @@ const MARKER_COMMENTS: ReadonlySet<string> = new Set([
   TEXT_NODE_SEPARATOR_MARKER,
 ]);
 
+/** What `stripSerializationArtifacts` removed, for logging. */
+export interface StrippedArtifacts {
+  readonly stateScript: boolean;
+  readonly replayScripts: number;
+  readonly markerComments: number;
+}
+
 /** Id of the `<script type="application/json">` that carries `TransferState`. */
 export function transferStateScriptId(appId: string): string {
   return `${appId}-state`;
@@ -27,19 +34,26 @@ export function transferStateScriptId(appId: string): string {
  * Removes every artifact of a previous serialization from `doc` so the next call to
  * Angular's `renderInternal` produces the same output a fresh render would.
  */
-export function stripSerializationArtifacts(doc: Document, appId: string): void {
-  doc.getElementById(transferStateScriptId(appId))?.remove();
+export function stripSerializationArtifacts(doc: Document, appId: string): StrippedArtifacts {
+  const stateScript = doc.getElementById(transferStateScriptId(appId));
+  stateScript?.remove();
 
+  let replayScripts = 0;
   for (const script of Array.from(doc.body.querySelectorAll('script'))) {
     if (script.textContent?.startsWith(EVENT_REPLAY_SCRIPT_PREFIX)) {
       script.remove();
+      replayScripts++;
     }
   }
 
-  removeMarkerComments(doc.body);
+  return {
+    stateScript: stateScript !== null,
+    replayScripts,
+    markerComments: removeMarkerComments(doc.body),
+  };
 }
 
-function removeMarkerComments(root: Node): void {
+function removeMarkerComments(root: Node): number {
   const doomed: Node[] = [];
   const visit = (node: Node): void => {
     for (const child of Array.from(node.childNodes)) {
@@ -56,4 +70,5 @@ function removeMarkerComments(root: Node): void {
   for (const node of doomed) {
     node.parentNode?.removeChild(node);
   }
+  return doomed.length;
 }
