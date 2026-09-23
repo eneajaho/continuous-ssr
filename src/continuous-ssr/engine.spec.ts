@@ -10,7 +10,9 @@ import { MemorySnapshotStore } from './snapshot-store';
 @Service()
 class Feed {
   readonly headline = sharedState('headline', 'first');
-  /** Not shared on purpose: changing it must not trigger a re-render by itself. */
+  /** Read by the about page only: a plain signal, tracked through the view's dependencies. */
+  readonly footnote = signal('note 1');
+  /** Read by nobody's template: changing it must not trigger a re-render by itself. */
   readonly itemIds = signal(['1', '2']);
 }
 
@@ -24,8 +26,10 @@ class HomePage {
   protected readonly feed = inject(Feed);
 }
 
-@Component({ selector: 'app-about', template: '<h1>About</h1>' })
-class AboutPage {}
+@Component({ selector: 'app-about', template: '<h1>About</h1><p>{{ feed.footnote() }}</p>' })
+class AboutPage {
+  protected readonly feed = inject(Feed);
+}
 
 @Component({ selector: 'app-root', imports: [RouterOutlet], template: '<router-outlet />' })
 class TestApp {}
@@ -146,6 +150,23 @@ describe('ContinuousAppEngine', () => {
     const html = await (await engine.handle(new Request('http://localhost/')))!.text();
     expect(html).toContain('<h1>second</h1>');
     expect(html).toContain('"headline":"second"');
+    const health = await engine.health();
+    expect(health.lastRun?.reasons).toContain('shared-state');
+    expect(health.lastRun?.routes).toBe(4);
+  });
+
+  it('re-renders only the routes that depend on a changed signal, whichever route is active', async () => {
+    const before = engine.version;
+    const homeBefore = (await engine.snapshots()).find((s) => s.path === '/')!.version;
+
+    engine.injector.get(Feed).footnote.set('note 2');
+    await until(() => engine.version > before);
+
+    const health = await engine.health();
+    expect(health.lastRun?.routes).toBe(1);
+    expect(health.lastRun?.reasons).toContain('dependency:/about');
+    expect(await (await engine.handle(new Request('http://localhost/about')))!.text()).toContain('<p>note 2</p>');
+    expect((await engine.snapshots()).find((s) => s.path === '/')!.version).toBe(homeBefore);
   });
 
   it('reports health with instance, run and snapshot details', async () => {

@@ -10,6 +10,8 @@ import {
 import { Logger, NOOP_LOGGER, ms } from './log';
 import { RenderLoop, RenderRunStats } from './render-loop';
 import { ContinuousBootstrap, ContinuousRenderer } from './renderer';
+import { RouteDependencyTracker } from './route-dependencies';
+import { registeredSharedSignals } from './shared-state';
 import { MemorySnapshotStore, Snapshot, SnapshotStore, SnapshotSummary } from './snapshot-store';
 
 export interface ContinuousAppEngineOptions {
@@ -65,8 +67,11 @@ export interface EngineHealth {
 interface LiveInstance {
   readonly renderer: ContinuousRenderer;
   readonly loop: RenderLoop;
+  readonly tracker: RouteDependencyTracker | undefined;
   readonly startedAt: number;
   stability: Subscription | undefined;
+  /** Why the next automatic refresh was requested, for the logs. */
+  pendingReasons: Set<string>;
 }
 
 const DEFAULT_CACHE_CONTROL = 'public, max-age=0, s-maxage=5, stale-while-revalidate=30';
@@ -241,6 +246,7 @@ export class ContinuousAppEngine {
     clearInterval(this.intervalTimer);
     if (this.instance) {
       this.instance.stability?.unsubscribe();
+      this.instance.tracker?.destroy();
       this.instance.renderer.destroy();
       this.instance = undefined;
     }
@@ -278,20 +284,81 @@ export class ContinuousAppEngine {
         )
       : undefined;
 
+    const instance: LiveInstance = {
+      renderer,
+      loop: undefined as unknown as RenderLoop,
+      tracker: undefined,
+      startedAt: Date.now(),
+      stability: undefined,
+      pendingReasons: new Set(),
+    };
+    const tracker =
+      (config.granular ?? true) && (config.autoRefresh ?? true)
+        ? new RouteDependencyTracker({
+            appRef: renderer.injector.get(ApplicationRef),
+            isRendering: () => renderer.isRendering,
+            sharedSignals: registeredSharedSignals,
+            onDirty: (route) => this.scheduleRefresh(instance, route === null ? 'shared-state' : `dependency:${route}`),
+            log: log.child('deps'),
+          })
+        : undefined;
+
     const loop = new RenderLoop({
       renderer,
       store,
       routes,
       initialVersion,
       postProcess: criticalCss ? (html) => criticalCss.process(html) : undefined,
+      afterRender: tracker
+        ? (path) => {
+            const producers = tracker.track(path);
+            log.debug('route dependencies tracked', { path, producers });
+          }
+        : undefined,
       onSnapshotStored: options.onSnapshotStored,
-      onRoutesDropped: (paths) => paths.forEach((path) => renderer.forgetRoute(path)),
+      onRoutesDropped: (paths) =>
+        paths.forEach((path) => {
+          renderer.forgetRoute(path);
+          tracker?.untrack(path);
+        }),
       onRunFinished: () => this.checkRecyclePolicy(config.recycle),
       log: log.child('loop'),
     });
+    Object.assign(instance, { loop, tracker });
     await loop.refresh('warm-up');
+    // Marks made while warming up came from the warm-up itself.
+    tracker?.takeDirty();
 
-    return { renderer, loop, startedAt: Date.now(), stability: undefined };
+    return instance;
+  }
+
+  /**
+   * Debounced automatic refresh. When it fires, the dependency tracker decides its scope:
+   * only the routes whose dependencies changed, or everything after a shared-state change or
+   * a change nobody could attribute.
+   */
+  private scheduleRefresh(instance: LiveInstance, reason: string): void {
+    if (this.stopped || instance !== this.instance) {
+      return;
+    }
+    instance.pendingReasons.add(reason);
+    const debounce = this.config.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      const reasons = Array.from(instance.pendingReasons).join('+');
+      instance.pendingReasons.clear();
+      const dirty = instance.tracker?.supported ? instance.tracker.takeDirty() : null;
+      if (dirty === null) {
+        void instance.loop.refresh(reasons);
+      } else if (dirty.length > 0) {
+        void instance.loop.refresh(reasons, dirty);
+      } else {
+        // Stability toggled but no tracked dependency changed: something unattributed.
+        void instance.loop.refresh(`${reasons}:unattributed`);
+      }
+    }, debounce);
+    // Node timers keep the process alive unless unref'd; the DOM typings know nothing of it.
+    (this.refreshTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   private async recycleNow(reason: string): Promise<void> {
@@ -308,6 +375,7 @@ export class ContinuousAppEngine {
     // Stop the old instance first: no new runs, wait for one in flight, then swap.
     old.loop.stop();
     old.stability?.unsubscribe();
+    old.tracker?.destroy();
     clearTimeout(this.refreshTimer);
     await old.loop.idle();
     this.instance = fresh;
@@ -364,7 +432,6 @@ export class ContinuousAppEngine {
       return;
     }
     const appRef = instance.renderer.injector.get(ApplicationRef);
-    const debounce = this.config.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     let wasUnstable = false;
 
     instance.stability = appRef.isStable.subscribe((stable) => {
@@ -379,11 +446,8 @@ export class ContinuousAppEngine {
       if (instance.renderer.isRendering) {
         return;
       }
-      this.log.debug('application changed, scheduling re-render', { debounce: ms(debounce) });
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => void instance.loop.refresh('app-changed'), debounce);
-      // Node timers keep the process alive unless unref'd; the DOM typings know nothing of it.
-      (this.refreshTimer as unknown as { unref?: () => void }).unref?.();
+      this.log.debug('application settled after a change');
+      this.scheduleRefresh(instance, 'app-changed');
     });
   }
 }

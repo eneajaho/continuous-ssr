@@ -14,6 +14,8 @@ export interface RenderLoopOptions {
   readonly routes: RouteList;
   /** Runs on every rendered document, e.g. to inline critical CSS. */
   readonly postProcess?: (html: string, path: string) => Promise<string> | string;
+  /** Called right after a route rendered, while its views are still mounted. */
+  readonly afterRender?: (path: string) => void;
   /** Called after a snapshot landed in the store, e.g. to purge a CDN. */
   readonly onSnapshotStored?: (snapshot: Snapshot) => void | Promise<void>;
   /** Called with paths that left the route list; their snapshots are already deleted. */
@@ -138,7 +140,8 @@ export class RenderLoop {
   }
 
   private async renderBatch(batch: PendingRefresh): Promise<void> {
-    const { renderer, store, postProcess, onSnapshotStored, onRoutesDropped, now, onError } = this.options;
+    const { renderer, store, postProcess, afterRender, onSnapshotStored, onRoutesDropped, now, onError } =
+      this.options;
     const version = this.version + 1;
     const startedAt = now ? now() : new Date().toISOString();
     const started = performance.now();
@@ -176,6 +179,7 @@ export class RenderLoop {
       const routeStarted = performance.now();
       try {
         const rendered = await renderer.render(path);
+        afterRender?.(path);
         const html = postProcess ? await postProcess(rendered, path) : rendered;
         const previous = await store.get(path);
         const etag = etagFor(html);

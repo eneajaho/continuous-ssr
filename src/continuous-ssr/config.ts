@@ -5,7 +5,7 @@ import {
   makeEnvironmentProviders,
   runInInjectionContext,
 } from '@angular/core';
-import { Router, Routes } from '@angular/router';
+import { ActivatedRouteSnapshot, BaseRouteReuseStrategy, RouteReuseStrategy, Router, Routes } from '@angular/router';
 
 export type RouteParams = Readonly<Record<string, string>>;
 
@@ -40,6 +40,12 @@ export interface ContinuousRenderingOptions {
   readonly autoRefresh?: boolean;
   /** Quiet time after the last change before an automatic re-render starts. Default 50ms. */
   readonly debounceMs?: number;
+  /**
+   * Re-render only the routes whose rendered views depend on what changed, tracked through
+   * the signal graph. Changes to `sharedState` and changes that cannot be attributed still
+   * re-render everything. Default `true`.
+   */
+  readonly granular?: boolean;
   /** `Cache-Control` header on snapshot responses. */
   readonly cacheControl?: string;
   /**
@@ -73,7 +79,22 @@ export const CONTINUOUS_RENDERING_OPTIONS = new InjectionToken<ContinuousRenderi
  * `provideContinuousRendering()` is enough.
  */
 export function provideContinuousRendering(options: ContinuousRenderingOptions = {}): EnvironmentProviders {
-  return makeEnvironmentProviders([{ provide: CONTINUOUS_RENDERING_OPTIONS, useValue: options }]);
+  return makeEnvironmentProviders([
+    { provide: CONTINUOUS_RENDERING_OPTIONS, useValue: options },
+    // The live application navigates between snapshot routes all the time. Angular would reuse
+    // a component instance between two instances of one parameterised route (/news/1 → /news/2),
+    // which shares that instance's state between two snapshots and confuses dependency
+    // tracking. Fresh components per navigation give every snapshot the state a fresh render
+    // would have. This only affects the server configuration.
+    { provide: RouteReuseStrategy, useClass: FreshComponentPerNavigationStrategy },
+  ]);
+}
+
+/** Never reuses a route's component when navigating to another instance of the same route. */
+export class FreshComponentPerNavigationStrategy extends BaseRouteReuseStrategy {
+  override shouldReuseRoute(future: ActivatedRouteSnapshot, current: ActivatedRouteSnapshot): boolean {
+    return future.routeConfig === current.routeConfig && future.routeConfig === null;
+  }
 }
 
 /**

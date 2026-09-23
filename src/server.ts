@@ -9,6 +9,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { Announcements } from './app/announcements';
 import type { LiveDataStore, LiveState } from './app/live-data.store';
 import type { ContinuousBootstrap } from './continuous-ssr/renderer';
 import type { ContinuousAppEngine, FileSnapshotStore, SnapshotStore } from './continuous-ssr/server';
@@ -40,7 +41,15 @@ const app = express();
 const angularApp = new AngularNodeAppEngine({ allowedHosts: ALLOWED_HOSTS });
 
 let continuous: ContinuousAppEngine | undefined;
+let serverEntry: ServerEntry | undefined;
 let liveStore: LiveDataStore | undefined;
+
+function entryOf(): ServerEntry {
+  if (!serverEntry) {
+    throw new Error('application bundle not loaded yet');
+  }
+  return serverEntry;
+}
 /** Demo: the last known live state, carried over to a recycled application. */
 let lastKnownState: LiveState | undefined;
 
@@ -50,6 +59,7 @@ interface ServerEntry {
   readonly ContinuousAppEngine: typeof ContinuousAppEngine;
   readonly FileSnapshotStore: typeof FileSnapshotStore;
   readonly LiveDataStore: typeof LiveDataStore;
+  readonly Announcements: typeof Announcements;
 }
 
 function createSnapshotStore(entry: ServerEntry): SnapshotStore | undefined {
@@ -77,6 +87,7 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
     readFile(indexPath, 'utf8'),
     import(/* @vite-ignore */ specifier) as Promise<ServerEntry>,
   ]);
+  serverEntry = entry;
   log.debug('application bundle loaded', { took: ms(performance.now() - started) });
 
   const engine = await entry.ContinuousAppEngine.start({
@@ -187,6 +198,20 @@ app.post('/api/increment', (_req, res) => {
   lastKnownState = liveStore.snapshot();
   log.info('live state changed', { source: 'api:increment', counter: liveStore.counter() });
   res.json(liveStore.snapshot());
+});
+
+/** Route-local state: only the about page depends on it, so only its snapshot is re-rendered. */
+app.post('/api/announce', express.json(), (req, res) => {
+  const body: unknown = req.body;
+  const text =
+    typeof body === 'object' && body !== null && 'text' in body && typeof body.text === 'string' ? body.text.trim() : '';
+  if (!continuous || continuous.role !== 'render') {
+    res.status(503).json({ error: 'continuous renderer is not running' });
+    return;
+  }
+  continuous.injector.get(entryOf().Announcements).banner.set(text.length ? text : null);
+  log.info('announcement changed', { text });
+  res.json({ banner: text || null });
 });
 
 /** Replaces the live application with a fresh one; the recycle policy does this on its own too. */

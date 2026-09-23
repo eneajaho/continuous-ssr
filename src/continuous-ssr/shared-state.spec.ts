@@ -1,6 +1,6 @@
-import { ApplicationRef, PLATFORM_ID, TransferState, makeStateKey } from '@angular/core';
+import { ApplicationRef, PLATFORM_ID, TransferState, makeStateKey, signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { makeSharedStateKey, registeredSharedStateKeys, sharedState } from './shared-state';
+import { makeSharedStateKey, registeredSharedStateKeys, sharedState, transferredState } from './shared-state';
 
 describe('makeSharedStateKey', () => {
   it('creates a state key and registers its name once', () => {
@@ -37,5 +37,30 @@ describe('sharedState', () => {
     await TestBed.inject(ApplicationRef).whenStable();
 
     expect(transferState.get(makeStateKey<string>('spec-mirrored'), '')).toBe('b');
+  });
+});
+
+describe('transferredState', () => {
+  it('prefers the transferred value in the browser and falls back to the source', () => {
+    TestBed.inject(TransferState).set(makeStateKey<string>('spec-route'), 'from the snapshot');
+
+    const transferred = TestBed.runInInjectionContext(() => transferredState('spec-route', () => 'computed'));
+    const fallback = TestBed.runInInjectionContext(() => transferredState('spec-route-missing', () => 'computed'));
+
+    expect(transferred()).toBe('from the snapshot');
+    expect(fallback()).toBe('computed');
+  });
+
+  it('computes from the source and mirrors it into TransferState on the server', async () => {
+    TestBed.configureTestingModule({ providers: [{ provide: PLATFORM_ID, useValue: 'server' }] });
+    const transferState = TestBed.inject(TransferState);
+    const source = signal('a');
+    const value = TestBed.runInInjectionContext(() => transferredState('spec-route-server', () => source()));
+
+    source.set('b');
+    await TestBed.inject(ApplicationRef).whenStable();
+
+    expect(value()).toBe('b');
+    expect(transferState.get(makeStateKey<string>('spec-route-server'), '')).toBe('b');
   });
 });

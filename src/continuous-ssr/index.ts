@@ -4,4 +4,4 @@
  * also runs in the browser; the engine itself is in `./server`.
  */
 export { provideContinuousRendering, type ContinuousRenderingOptions } from './config';
-export { makeSharedStateKey, sharedState } from './shared-state';
+export { makeSharedStateKey, sharedState, transferredState } from './shared-state';

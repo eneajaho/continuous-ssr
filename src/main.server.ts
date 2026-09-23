@@ -12,4 +12,5 @@ export default bootstrap;
  */
 export * from './continuous-ssr/server';
 /** Demo only: lets the API endpoints in `server.ts` mutate the live state. */
+export { Announcements } from './app/announcements';
 export { LiveDataStore } from './app/live-data.store';

@@ -247,3 +247,31 @@ test('parameterised routes get one snapshot per instance with their own transfer
   assert.deepEqual(snapshots.filter((p) => p.startsWith('/news/')).sort(), ['/news/1', '/news/2', '/news/3']);
   assert.equal((await fetch(`${BASE}/news/999`)).headers.get('x-ssr-mode'), 'per-request');
 });
+
+test('route-local state re-renders only the route that depends on it', async () => {
+  const text = `Only the about page changed ${Date.now()}`;
+  // Post right after a tick run so the announcement gets a debounce window of its own.
+  const tickVersion = (await state()).version;
+  await waitFor(async () => (await state()).version > tickVersion, { label: 'a tick run' });
+
+  const response = await fetch(`${BASE}/api/announce`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  assert.equal(response.status, 200);
+
+  const targeted = await waitFor(
+    async () => {
+      const health = await (await fetch(`${BASE}/healthz`)).json();
+      return /dependency:\/about/.test(health.lastRun.reasons) ? health.lastRun : null;
+    },
+    { label: 'a run triggered by the about dependency', timeout: 5_000 },
+  );
+  assert.equal(targeted.routes, 1, `only one route rendered (${targeted.reasons})`);
+
+  const html = await (await fetch(`${BASE}/about`)).text();
+  assert.ok(html.includes(text), 'about snapshot carries the announcement');
+  assert.equal(transferState(html)['about-banner'], text, 'banner travels in the about transfer state');
+  assert.equal(transferState(await (await fetch(`${BASE}/`)).text())['about-banner'], undefined, 'not in other snapshots');
+});

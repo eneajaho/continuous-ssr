@@ -1,9 +1,11 @@
 import { isPlatformServer } from '@angular/common';
 import {
   PLATFORM_ID,
+  Signal,
   StateKey,
   TransferState,
   WritableSignal,
+  computed,
   effect,
   inject,
   makeStateKey,
@@ -11,6 +13,7 @@ import {
 } from '@angular/core';
 
 const registry = new Set<string>();
+const signals = new Set<Signal<unknown>>();
 
 /**
  * Creates a `TransferState` key for app-wide state: state a root service mirrors into the
@@ -28,6 +31,11 @@ export function makeSharedStateKey<T>(name: string): StateKey<T> {
 /** Names of every key created with `makeSharedStateKey` or `sharedState`. */
 export function registeredSharedStateKeys(): readonly string[] {
   return Array.from(registry);
+}
+
+/** Every signal created with `sharedState`; a change to any of them touches every snapshot. */
+export function registeredSharedSignals(): readonly Signal<unknown>[] {
+  return Array.from(signals);
 }
 
 /**
@@ -51,7 +59,32 @@ export function sharedState<T>(name: string, initial: T): WritableSignal<T> {
   const transferState = inject(TransferState);
   const state = signal<T>(transferState.get(key, initial));
   if (isPlatformServer(inject(PLATFORM_ID))) {
+    signals.add(state);
     effect(() => transferState.set(key, state()));
   }
   return state;
+}
+
+/**
+ * Route-local server state that hydrates. Call it inside a page component.
+ *
+ * On the server it is `computed(source)`, mirrored into `TransferState` under `name` while
+ * the page renders, so the key belongs to this route's snapshot only and a change to whatever
+ * `source` reads re-renders just this route. In the browser it is the transferred value; when
+ * none was transferred (client-side navigation to a page that was not in the snapshot),
+ * `source` runs in the browser instead.
+ *
+ * ```ts
+ * protected readonly banner = transferredState('about-banner', () => inject(Announcements).banner());
+ * ```
+ */
+export function transferredState<T>(name: string, source: () => T): Signal<T> {
+  const key = makeStateKey<T>(name);
+  const transferState = inject(TransferState);
+  const value = computed(source);
+  if (isPlatformServer(inject(PLATFORM_ID))) {
+    effect(() => transferState.set(key, value()));
+    return value;
+  }
+  return transferState.hasKey(key) ? signal(transferState.get(key, value())).asReadonly() : value;
 }
