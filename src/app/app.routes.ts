@@ -17,6 +17,11 @@ export const routes: Routes = [
     loadComponent: () => import('./pages/news-article').then((m) => m.NewsArticlePage),
   },
   {
+    path: 'stats',
+    title: 'Stats · Continuous SSR',
+    loadComponent: () => import('./pages/stats').then((m) => m.StatsPage),
+  },
+  {
     path: 'docs',
     loadComponent: () => import('./pages/docs/docs-layout').then((m) => m.DocsLayout),
     children: [

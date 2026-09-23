@@ -354,3 +354,29 @@ test('nested static routes are discovered and a webhook refreshes only the liste
   assert.equal(health.lastRun.routes, 1);
   assert.ok(Number((await fetch(`${BASE}/news`)).headers.get('x-ssr-version')) > before);
 });
+
+test('deferred blocks and incremental hydration serialize from the live app', async () => {
+  const response = await fetch(`${BASE}/stats`);
+  const html = await response.text();
+
+  assert.equal(response.headers.get('x-ssr-mode'), 'continuous');
+  assert.ok(html.includes('<app-stats-chart'), 'hydrate-on-interaction block is server rendered');
+  assert.ok(html.includes('jsaction='), 'interaction triggers are recorded for replay');
+  assert.ok(html.includes('Details placeholder'), 'viewport block ships its placeholder');
+  assert.ok(!html.includes('<app-stats-details'), 'viewport block content is not rendered');
+  const stateKeys = Object.keys(transferState(html));
+  assert.ok(stateKeys.includes('__nghDeferData__'), `defer hydration data present (${stateKeys})`);
+  assert.equal(occurrences(html, 'id="ng-state"'), 1);
+
+  // Still intact after the live app re-rendered it.
+  const version = Number(response.headers.get('x-ssr-version'));
+  const later = await waitFor(
+    async () => {
+      const again = await fetch(`${BASE}/stats`);
+      return Number(again.headers.get('x-ssr-version')) > version ? await again.text() : null;
+    },
+    { label: 'a newer stats snapshot' },
+  );
+  assert.ok(later.includes('jsaction=') && later.includes('__nghDeferData__'));
+  assert.equal(occurrences(later, 'id="ng-state"'), 1);
+});
