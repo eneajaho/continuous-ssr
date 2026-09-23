@@ -20,6 +20,9 @@ export interface RenderLoopOptions {
   readonly onRoutesDropped?: (paths: readonly string[]) => void;
   readonly now?: () => string;
   readonly onError?: (error: unknown, path: string) => void;
+  readonly onRunFinished?: (stats: RenderRunStats) => void;
+  /** Version numbering continues from here, so a replacement loop never goes backwards. */
+  readonly initialVersion?: number;
   readonly log?: Logger;
 }
 
@@ -52,10 +55,12 @@ export class RenderLoop {
   private knownRoutes: readonly string[] = [];
   private lastRun: RenderRunStats | undefined;
   private consecutiveFailedRuns = 0;
+  private stopped = false;
   private readonly log: Logger;
 
   constructor(private readonly options: RenderLoopOptions) {
     this.log = options.log ?? NOOP_LOGGER;
+    this.version = options.initialVersion ?? 0;
   }
 
   /** Version of the most recently completed run. */
@@ -84,6 +89,10 @@ export class RenderLoop {
    * @param paths Only these routes; omit for all of them.
    */
   refresh(reason = 'unspecified', paths?: readonly string[]): Promise<void> {
+    if (this.stopped) {
+      this.log.debug('refresh ignored, loop is stopped', { reason });
+      return this.running ?? Promise.resolve();
+    }
     const pending = (this.pending ??= { full: false, paths: new Set(), reasons: [] });
     pending.reasons.push(reason);
     if (paths) {
@@ -102,6 +111,22 @@ export class RenderLoop {
       this.running = null;
     });
     return this.running;
+  }
+
+  /** Resolves once no run is in progress. */
+  idle(): Promise<void> {
+    return this.running ?? Promise.resolve();
+  }
+
+  /** Refuses new runs; the current one, if any, finishes. */
+  stop(): void {
+    this.stopped = true;
+    this.pending = null;
+  }
+
+  /** Moves the version forward so a replacement loop never reuses a number. */
+  bumpVersionTo(version: number): void {
+    this.version = Math.max(this.version, version);
   }
 
   private async runUntilClean(): Promise<void> {
@@ -194,6 +219,7 @@ export class RenderLoop {
       took: ms(performance.now() - started),
       rerun: this.pending !== null,
     });
+    this.options.onRunFinished?.(this.lastRun);
   }
 
   private async resolveRoutes(): Promise<readonly string[]> {

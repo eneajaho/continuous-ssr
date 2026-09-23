@@ -9,7 +9,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { LiveDataStore } from './app/live-data.store';
+import type { LiveDataStore, LiveState } from './app/live-data.store';
 import type { ContinuousBootstrap } from './continuous-ssr/renderer';
 import type { ContinuousAppEngine, FileSnapshotStore, SnapshotStore } from './continuous-ssr/server';
 import { createLogger, isLogLevel, ms } from './continuous-ssr/log';
@@ -41,6 +41,8 @@ const angularApp = new AngularNodeAppEngine({ allowedHosts: ALLOWED_HOSTS });
 
 let continuous: ContinuousAppEngine | undefined;
 let liveStore: LiveDataStore | undefined;
+/** Demo: the last known live state, carried over to a recycled application. */
+let lastKnownState: LiveState | undefined;
 
 /** What the built `main.server.mjs` exports: everything `src/main.server.ts` exports. */
 interface ServerEntry {
@@ -84,6 +86,19 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
     role: SSR_ROLE,
     store: createSnapshotStore(entry),
     readBrowserAsset: (fileName) => readFile(join(browserDistFolder, fileName), 'utf8'),
+    // Demo: seed the live state of every fresh application (at start and after a recycle).
+    // A real app's services would fetch their own data on bootstrap; every change they make
+    // afterwards re-renders the snapshots automatically.
+    prepare: (injector) => {
+      liveStore = injector.get(entry.LiveDataStore);
+      liveStore.apply(
+        lastKnownState ?? {
+          counter: 0,
+          message: 'Hello from the continuous renderer',
+          updatedAt: new Date().toISOString(),
+        },
+      );
+    },
     log,
   });
   continuous = engine;
@@ -91,18 +106,13 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
     return engine;
   }
 
-  // Demo: seed the live state and keep it moving. A real app's services would fetch their
-  // own data here; every change they make re-renders the snapshots automatically.
-  const store = engine.injector.get(entry.LiveDataStore);
-  store.apply({ counter: 0, message: 'Hello from the continuous renderer', updatedAt: new Date().toISOString() });
   if (TICK_MS > 0) {
     setInterval(() => {
-      store.increment(new Date().toISOString());
-      log.debug('tick', { counter: store.counter() });
+      liveStore?.increment(new Date().toISOString());
+      lastKnownState = liveStore?.snapshot();
+      log.debug('tick', { counter: liveStore?.counter() });
     }, TICK_MS).unref();
   }
-
-  liveStore = store;
   return engine;
 }
 
@@ -149,6 +159,7 @@ app.post('/api/message', express.json(), (req, res) => {
     return;
   }
   liveStore.setMessage(message, new Date().toISOString());
+  lastKnownState = liveStore.snapshot();
   log.info('live state changed', { source: 'api:message', message });
   res.json(liveStore.snapshot());
 });
@@ -159,8 +170,29 @@ app.post('/api/increment', (_req, res) => {
     return;
   }
   liveStore.increment(new Date().toISOString());
+  lastKnownState = liveStore.snapshot();
   log.info('live state changed', { source: 'api:increment', counter: liveStore.counter() });
   res.json(liveStore.snapshot());
+});
+
+/** Replaces the live application with a fresh one; the recycle policy does this on its own too. */
+app.post('/api/recycle', async (_req, res) => {
+  if (!continuous || continuous.role !== 'render') {
+    res.status(503).json({ error: 'continuous renderer is not running' });
+    return;
+  }
+  await continuous.recycle('api');
+  res.json(await continuous.health());
+});
+
+/** Liveness and readiness in one: 503 until snapshots exist or when rendering keeps failing. */
+app.get('/healthz', async (_req, res) => {
+  if (!continuous) {
+    res.status(503).json({ ok: false, reason: 'continuous engine not started' });
+    return;
+  }
+  const health = await continuous.health();
+  res.status(health.ok ? 200 : 503).json(health);
 });
 
 /**

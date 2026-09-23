@@ -8,7 +8,11 @@ const serverConfig: ApplicationConfig = {
   providers: [
     provideServerRendering(withRoutes(serverRoutes)),
     // Snapshots for every static route, re-rendered whenever the live app changes.
-    provideContinuousRendering(),
+    provideContinuousRendering({
+      // Safety net for changes the app cannot see, and a bound on what a long life accumulates.
+      refreshIntervalMs: 60_000,
+      recycle: { afterRenders: 5_000, afterMs: 60 * 60_000, maxHeapMb: 512 },
+    }),
   ],
 };
 

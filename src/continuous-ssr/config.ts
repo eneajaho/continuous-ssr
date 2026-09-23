@@ -16,6 +16,25 @@ export interface ContinuousRenderingOptions {
   readonly debounceMs?: number;
   /** `Cache-Control` header on snapshot responses. */
   readonly cacheControl?: string;
+  /**
+   * Re-render everything on a timer regardless of detected changes, as a safety net for
+   * changes the application cannot see. Off by default.
+   */
+  readonly refreshIntervalMs?: number;
+  /**
+   * When to replace the live application with a fresh one. A long-lived app accumulates
+   * whatever its services leak; recycling bounds that. Checked after every render run.
+   */
+  readonly recycle?: RecyclePolicy;
+}
+
+export interface RecyclePolicy {
+  /** Recycle once the instance has produced this many renders. */
+  readonly afterRenders?: number;
+  /** Recycle once the instance is this old. */
+  readonly afterMs?: number;
+  /** Recycle once the process heap exceeds this many megabytes. */
+  readonly maxHeapMb?: number;
 }
 
 export const CONTINUOUS_RENDERING_OPTIONS = new InjectionToken<ContinuousRenderingOptions>(

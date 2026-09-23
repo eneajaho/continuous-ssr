@@ -2,9 +2,14 @@ import { ApplicationRef, EnvironmentInjector } from '@angular/core';
 import { Router } from '@angular/router';
 import { ɵInlineCriticalCssProcessor as InlineCriticalCssProcessor } from '@angular/ssr';
 import type { Subscription } from 'rxjs';
-import { CONTINUOUS_RENDERING_OPTIONS, ContinuousRenderingOptions, discoverStaticRoutes } from './config';
+import {
+  CONTINUOUS_RENDERING_OPTIONS,
+  ContinuousRenderingOptions,
+  RecyclePolicy,
+  discoverStaticRoutes,
+} from './config';
 import { Logger, NOOP_LOGGER, ms } from './log';
-import { RenderLoop } from './render-loop';
+import { RenderLoop, RenderRunStats } from './render-loop';
 import { ContinuousBootstrap, ContinuousRenderer } from './renderer';
 import { MemorySnapshotStore, Snapshot, SnapshotStore, SnapshotSummary } from './snapshot-store';
 
@@ -23,6 +28,12 @@ export interface ContinuousAppEngineOptions {
   readonly role?: 'render' | 'serve';
   /** Where snapshots live. Defaults to an in-memory store for this process. */
   readonly store?: SnapshotStore;
+  /**
+   * Runs for every fresh live application, at start and after each recycle, before its first
+   * snapshots. Seed state or open data feeds here; services that fetch their own data on
+   * bootstrap need nothing.
+   */
+  readonly prepare?: (injector: EnvironmentInjector) => void | Promise<void>;
   /** Called after each snapshot lands in the store, e.g. to purge a CDN path. */
   readonly onSnapshotStored?: (snapshot: Snapshot) => void | Promise<void>;
   /**
@@ -33,8 +44,35 @@ export interface ContinuousAppEngineOptions {
   readonly log?: Logger;
 }
 
+export interface EngineHealth {
+  /** Snapshots exist and rendering is not failing outright. */
+  readonly ok: boolean;
+  readonly role: 'render' | 'serve';
+  readonly version: number;
+  readonly instance?: {
+    readonly startedAt: string;
+    readonly ageMs: number;
+    readonly renders: number;
+    readonly recycles: number;
+    readonly recycling: boolean;
+  };
+  readonly lastRun?: RenderRunStats;
+  readonly consecutiveFailedRuns: number;
+  readonly heapUsedMb?: number;
+  readonly snapshots: readonly (SnapshotSummary & { readonly ageMs: number })[];
+}
+
+/** One live application with its render loop. Replaced wholesale on recycle. */
+interface LiveInstance {
+  readonly renderer: ContinuousRenderer;
+  readonly loop: RenderLoop;
+  readonly startedAt: number;
+  stability: Subscription | undefined;
+}
+
 const DEFAULT_CACHE_CONTROL = 'public, max-age=0, s-maxage=5, stale-while-revalidate=30';
 const DEFAULT_DEBOUNCE_MS = 50;
+const UNHEALTHY_AFTER_FAILED_RUNS = 3;
 
 /**
  * The whole continuous-rendering pipeline behind one object: boots the application once,
@@ -44,69 +82,38 @@ const DEFAULT_DEBOUNCE_MS = 50;
  * in the application's server config; nothing else needs to be wired.
  */
 export class ContinuousAppEngine {
-  private stability: Subscription | undefined;
+  private instance: LiveInstance | undefined;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private intervalTimer: ReturnType<typeof setInterval> | undefined;
+  private recycles = 0;
+  private recycling: Promise<void> | undefined;
+  private stopped = false;
 
   private constructor(
-    private readonly renderer: ContinuousRenderer | undefined,
-    private readonly loop: RenderLoop | undefined,
+    private readonly options: ContinuousAppEngineOptions,
     private readonly store: SnapshotStore,
-    private readonly config: ContinuousRenderingOptions,
     private readonly log: Logger,
   ) {}
 
   static async start(options: ContinuousAppEngineOptions): Promise<ContinuousAppEngine> {
     const log = options.log ?? NOOP_LOGGER;
     const store = options.store ?? new MemorySnapshotStore();
+    const engine = new ContinuousAppEngine(options, store, log);
 
     if (options.role === 'serve') {
       log.info('serving snapshots only; another instance renders them', {
         snapshots: (await store.summaries()).length,
       });
-      return new ContinuousAppEngine(undefined, undefined, store, {}, log);
+      return engine;
     }
 
     const started = performance.now();
-    const renderer = await ContinuousRenderer.create({
-      bootstrap: options.bootstrap,
-      document: options.document,
-      url: `${options.origin}/`,
-      log: log.child('renderer'),
-    });
-
-    const config = renderer.injector.get(CONTINUOUS_RENDERING_OPTIONS, null) ?? {};
-    const routes =
-      config.routes ?? discoverStaticRoutes(renderer.injector.get(Router, null)?.config ?? []);
-    log.info('continuous rendering configured', {
-      routes: routes.join(','),
-      source: config.routes ? 'options' : 'router',
-      autoRefresh: config.autoRefresh ?? true,
-      store: store.constructor.name,
-    });
-
-    const criticalCss = options.readBrowserAsset
-      ? new InlineCriticalCssProcessor((path) =>
-          options.readBrowserAsset!(path.split('/').pop() ?? path),
-        )
-      : undefined;
-
-    const loop = new RenderLoop({
-      renderer,
-      store,
-      routes,
-      postProcess: criticalCss ? (html) => criticalCss.process(html) : undefined,
-      onSnapshotStored: options.onSnapshotStored,
-      log: log.child('loop'),
-    });
-    await loop.refresh('warm-up');
-
-    const engine = new ContinuousAppEngine(renderer, loop, store, config, log);
-    if (config.autoRefresh ?? true) {
-      engine.watchApplication();
-    }
+    engine.instance = await engine.createInstance(0);
+    engine.watchApplication(engine.instance);
+    engine.startInterval();
     log.info('continuous engine ready', {
       snapshots: (await store.summaries()).length,
-      version: loop.currentVersion,
+      version: engine.version,
       took: ms(performance.now() - started),
     });
     return engine;
@@ -114,22 +121,56 @@ export class ContinuousAppEngine {
 
   /** Reaches services of the live application, e.g. to feed it data. Render role only. */
   get injector(): EnvironmentInjector {
-    if (!this.renderer) {
+    if (!this.instance) {
       throw new Error('This engine only serves snapshots; there is no live application.');
     }
-    return this.renderer.injector;
+    return this.instance.renderer.injector;
   }
 
   get role(): 'render' | 'serve' {
-    return this.renderer ? 'render' : 'serve';
+    return this.instance ? 'render' : 'serve';
   }
 
   get version(): number {
-    return this.loop?.currentVersion ?? 0;
+    return this.instance?.loop.currentVersion ?? 0;
+  }
+
+  /** Effective options, as provided by `provideContinuousRendering` in the app. */
+  get config(): ContinuousRenderingOptions {
+    return this.instance?.renderer.injector.get(CONTINUOUS_RENDERING_OPTIONS, null) ?? {};
   }
 
   snapshots(): Promise<SnapshotSummary[]> {
     return this.store.summaries();
+  }
+
+  async health(): Promise<EngineHealth> {
+    const now = Date.now();
+    const snapshots = (await this.store.summaries()).map((summary) => ({
+      ...summary,
+      ageMs: now - Date.parse(summary.renderedAt),
+    }));
+    const stats = this.instance?.loop.stats;
+    const instance = this.instance
+      ? {
+          startedAt: new Date(this.instance.startedAt).toISOString(),
+          ageMs: now - this.instance.startedAt,
+          renders: this.instance.renderer.renderCount,
+          recycles: this.recycles,
+          recycling: this.recycling !== undefined,
+        }
+      : undefined;
+    const consecutiveFailedRuns = stats?.consecutiveFailedRuns ?? 0;
+    return {
+      ok: snapshots.length > 0 && consecutiveFailedRuns < UNHEALTHY_AFTER_FAILED_RUNS,
+      role: this.role,
+      version: this.version,
+      instance,
+      lastRun: stats?.lastRun,
+      consecutiveFailedRuns,
+      heapUsedMb: heapUsedMb(),
+      snapshots,
+    };
   }
 
   /**
@@ -137,10 +178,25 @@ export class ContinuousAppEngine {
    * cannot see, such as an external API behind a webhook, or with `autoRefresh: false`.
    */
   refresh(reason = 'manual', paths?: readonly string[]): Promise<void> {
-    if (!this.loop) {
+    if (!this.instance) {
       return Promise.reject(new Error('This engine only serves snapshots; it cannot render.'));
     }
-    return this.loop.refresh(reason, paths);
+    return this.instance.loop.refresh(reason, paths);
+  }
+
+  /**
+   * Replaces the live application with a freshly bootstrapped one. The new instance is
+   * prepared and warmed up in the background while the old one keeps serving; then they swap
+   * and the old one is destroyed. Concurrent calls share one recycle.
+   */
+  recycle(reason = 'manual'): Promise<void> {
+    if (!this.instance) {
+      return Promise.reject(new Error('This engine only serves snapshots; there is nothing to recycle.'));
+    }
+    this.recycling ??= this.recycleNow(reason).finally(() => {
+      this.recycling = undefined;
+    });
+    return this.recycling;
   }
 
   /**
@@ -181,23 +237,136 @@ export class ContinuousAppEngine {
   }
 
   stop(): void {
-    this.stability?.unsubscribe();
+    this.stopped = true;
     clearTimeout(this.refreshTimer);
-    this.renderer?.destroy();
+    clearInterval(this.intervalTimer);
+    if (this.instance) {
+      this.instance.stability?.unsubscribe();
+      this.instance.renderer.destroy();
+      this.instance = undefined;
+    }
+  }
+
+  private async createInstance(initialVersion: number): Promise<LiveInstance> {
+    const { options, store, log } = this;
+    const renderer = await ContinuousRenderer.create({
+      bootstrap: options.bootstrap,
+      document: options.document,
+      url: `${options.origin}/`,
+      log: log.child('renderer'),
+    });
+
+    const config = renderer.injector.get(CONTINUOUS_RENDERING_OPTIONS, null) ?? {};
+    const routes =
+      config.routes ?? discoverStaticRoutes(renderer.injector.get(Router, null)?.config ?? []);
+    log.info('continuous rendering configured', {
+      routes: routes.join(','),
+      source: config.routes ? 'options' : 'router',
+      autoRefresh: config.autoRefresh ?? true,
+      store: store.constructor.name,
+    });
+
+    if (options.prepare) {
+      const prepared = performance.now();
+      await options.prepare(renderer.injector);
+      log.debug('application prepared', { took: ms(performance.now() - prepared) });
+    }
+
+    const criticalCss = options.readBrowserAsset
+      ? new InlineCriticalCssProcessor((path) =>
+          options.readBrowserAsset!(path.split('/').pop() ?? path),
+        )
+      : undefined;
+
+    const loop = new RenderLoop({
+      renderer,
+      store,
+      routes,
+      initialVersion,
+      postProcess: criticalCss ? (html) => criticalCss.process(html) : undefined,
+      onSnapshotStored: options.onSnapshotStored,
+      onRunFinished: () => this.checkRecyclePolicy(config.recycle),
+      log: log.child('loop'),
+    });
+    await loop.refresh('warm-up');
+
+    return { renderer, loop, startedAt: Date.now(), stability: undefined };
+  }
+
+  private async recycleNow(reason: string): Promise<void> {
+    const old = this.instance!;
+    const started = performance.now();
+    this.log.info('recycling live application', { reason, renders: old.renderer.renderCount });
+
+    const fresh = await this.createInstance(old.loop.currentVersion);
+    if (this.stopped) {
+      fresh.renderer.destroy();
+      return;
+    }
+
+    // Stop the old instance first: no new runs, wait for one in flight, then swap.
+    old.loop.stop();
+    old.stability?.unsubscribe();
+    clearTimeout(this.refreshTimer);
+    await old.loop.idle();
+    this.instance = fresh;
+    this.recycles++;
+    this.watchApplication(fresh);
+    old.renderer.destroy();
+    // The old instance may have written snapshots while the fresh one warmed up; render once
+    // more so the store reflects the fresh instance with a version past everything before.
+    fresh.loop.bumpVersionTo(old.loop.currentVersion);
+    await fresh.loop.refresh('recycled');
+    this.log.info('live application recycled', {
+      recycles: this.recycles,
+      version: fresh.loop.currentVersion,
+      took: ms(performance.now() - started),
+    });
+  }
+
+  private checkRecyclePolicy(policy: RecyclePolicy | undefined): void {
+    const instance = this.instance;
+    if (!policy || !instance || this.recycling || this.stopped) {
+      return;
+    }
+    let reason: string | undefined;
+    if (policy.afterRenders !== undefined && instance.renderer.renderCount >= policy.afterRenders) {
+      reason = `renders>=${policy.afterRenders}`;
+    } else if (policy.afterMs !== undefined && Date.now() - instance.startedAt >= policy.afterMs) {
+      reason = `age>=${ms(policy.afterMs)}`;
+    } else if (policy.maxHeapMb !== undefined && (heapUsedMb() ?? 0) >= policy.maxHeapMb) {
+      reason = `heap>=${policy.maxHeapMb}MB`;
+    }
+    if (reason) {
+      void this.recycle(reason).catch((error) =>
+        this.log.error('recycle failed; keeping the current instance', { reason }, error),
+      );
+    }
+  }
+
+  private startInterval(): void {
+    const interval = this.config.refreshIntervalMs;
+    if (!interval || interval <= 0) {
+      return;
+    }
+    this.intervalTimer = setInterval(() => void this.instance?.loop.refresh('interval'), interval);
+    (this.intervalTimer as unknown as { unref?: () => void }).unref?.();
+    this.log.info('periodic refresh enabled', { every: ms(interval) });
   }
 
   /**
    * Re-renders whenever the application becomes stable again after a change of its own. The
    * renderer's own navigations also toggle stability; those are ignored while it is rendering.
    */
-  private watchApplication(): void {
-    const renderer = this.renderer!;
-    const loop = this.loop!;
-    const appRef = renderer.injector.get(ApplicationRef);
+  private watchApplication(instance: LiveInstance): void {
+    if (!(this.config.autoRefresh ?? true)) {
+      return;
+    }
+    const appRef = instance.renderer.injector.get(ApplicationRef);
     const debounce = this.config.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     let wasUnstable = false;
 
-    this.stability = appRef.isStable.subscribe((stable) => {
+    instance.stability = appRef.isStable.subscribe((stable) => {
       if (!stable) {
         wasUnstable = true;
         return;
@@ -206,14 +375,20 @@ export class ContinuousAppEngine {
         return;
       }
       wasUnstable = false;
-      if (renderer.isRendering) {
+      if (instance.renderer.isRendering) {
         return;
       }
       this.log.debug('application changed, scheduling re-render', { debounce: ms(debounce) });
       clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => void loop.refresh('app-changed'), debounce);
+      this.refreshTimer = setTimeout(() => void instance.loop.refresh('app-changed'), debounce);
       // Node timers keep the process alive unless unref'd; the DOM typings know nothing of it.
       (this.refreshTimer as unknown as { unref?: () => void }).unref?.();
     });
   }
+}
+
+function heapUsedMb(): number | undefined {
+  const memory = (globalThis as { process?: { memoryUsage?: () => { heapUsed: number } } }).process
+    ?.memoryUsage;
+  return memory ? Math.round(memory().heapUsed / 1024 / 1024) : undefined;
 }

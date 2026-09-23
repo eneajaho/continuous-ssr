@@ -198,3 +198,34 @@ test('other pages never carry the news API response', async () => {
     assert.ok(keys.includes('live-state'), `${path} keeps the shared live state`);
   }
 });
+
+test('reports health and survives a recycle without losing snapshots or state', async () => {
+  const before = await (await fetch(`${BASE}/healthz`)).json();
+  assert.equal(before.ok, true);
+  assert.equal(before.role, 'render');
+  assert.equal(before.instance.recycles, 0);
+  const message = `kept across recycle ${Date.now()}`;
+  await fetch(`${BASE}/api/message`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+
+  const recycled = await fetch(`${BASE}/api/recycle`, { method: 'POST' });
+  assert.equal(recycled.status, 200);
+  const health = await recycled.json();
+  assert.equal(health.instance.recycles, 1);
+  assert.equal(health.instance.recycling, false);
+  assert.ok(health.version >= before.version, 'version never goes backwards');
+
+  const page = await fetch(`${BASE}/`);
+  assert.equal(page.headers.get('x-ssr-mode'), 'continuous');
+  const html = await page.text();
+  assert.ok(html.includes(message), 'state carried over by prepare()');
+  assert.equal(occurrences(html, 'id="ng-state"'), 1);
+
+  // The fresh instance keeps re-rendering on changes.
+  const version = (await state()).version;
+  await fetch(`${BASE}/api/increment`, { method: 'POST' });
+  await waitFor(async () => (await state()).version > version, { label: 'a run after recycle' });
+});

@@ -56,6 +56,7 @@ async function until(check: () => boolean, timeoutMs = 2000): Promise<void> {
 
 describe('ContinuousAppEngine', () => {
   let engine: ContinuousAppEngine;
+  const prepared: string[] = [];
 
   beforeAll(async () => {
     destroyPlatform();
@@ -63,6 +64,9 @@ describe('ContinuousAppEngine', () => {
       bootstrap,
       document: DOCUMENT_TEMPLATE,
       origin: 'http://localhost',
+      prepare: (injector) => {
+        prepared.push(injector.get(Feed).headline());
+      },
     });
   });
 
@@ -105,6 +109,37 @@ describe('ContinuousAppEngine', () => {
     const html = await (await engine.handle(new Request('http://localhost/')))!.text();
     expect(html).toContain('<h1>second</h1>');
     expect(html).toContain('"headline":"second"');
+  });
+
+  it('reports health with instance, run and snapshot details', async () => {
+    const health = await engine.health();
+
+    expect(health.ok).toBe(true);
+    expect(health.role).toBe('render');
+    expect(health.instance).toMatchObject({ renders: expect.any(Number), recycles: 0, recycling: false });
+    expect(health.lastRun?.failed).toEqual([]);
+    expect(health.snapshots.map((s) => s.path).sort()).toEqual(['/', '/about']);
+    expect(prepared).toEqual(['first']);
+  });
+
+  it('recycles into a fresh application while keeping snapshots and auto-refresh', async () => {
+    const oldInjector = engine.injector;
+    engine.injector.get(Feed).headline.set('before recycle');
+    await until(() => (engine.version > 0) && !(engine.injector.get(Feed).headline() !== 'before recycle'));
+
+    await engine.recycle('spec');
+
+    expect(engine.injector).not.toBe(oldInjector);
+    expect((await engine.health()).instance?.recycles).toBe(1);
+    expect(prepared).toEqual(['first', 'first']);
+    // The fresh instance starts from its own initial state and rendered it.
+    const html = await (await engine.handle(new Request('http://localhost/')))!.text();
+    expect(html).toContain('<h1>first</h1>');
+
+    const before = engine.version;
+    engine.injector.get(Feed).headline.set('after recycle');
+    await until(() => engine.version > before);
+    expect(await (await engine.handle(new Request('http://localhost/')))!.text()).toContain('<h1>after recycle</h1>');
   });
 
   it('shares its store with a serve-only engine and notifies stored snapshots', async () => {
