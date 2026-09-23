@@ -73,6 +73,19 @@ Handling, in `ContinuousRenderer.renderNow` with `TransferStateScope`:
 4. Withhold keys owned by other routes, serialize, restore them. Shared keys, Angular's `__ngh*`
    keys and keys written between renders stay in every snapshot.
 
+## Beyond the first version
+
+Added after the initial build, each verified end to end:
+
+1. Pluggable `SnapshotStore` (memory, key/value adapter, file) and a serve-only role for many instances.
+2. Recycle policy with background warm-up and swap, `prepare` hook, health report, periodic refresh.
+3. Parameterised routes with `params` run inside the live app, exclusions, dropped-route cleanup.
+4. Granular re-rendering through the signal graph (`route-dependencies.ts`), with a fresh-component
+   route reuse strategy and rendering-time marks dropped; `transferredState` for route-local state.
+5. Per-visitor policy: `shouldServeSnapshot`, excluded pages reading `REQUEST`, client-side greeting.
+6. `ng serve` support through Angular's app manifest, server routes honoured (render mode, status,
+   headers), head tag scoping, nested routes, webhook, `@defer` with incremental hydration.
+
 ## Testing
 
 1. `ng test` (vitest, jsdom):
