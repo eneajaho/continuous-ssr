@@ -26,4 +26,16 @@ export const routes: Routes = [
     title: 'About · Continuous SSR',
     loadComponent: () => import('./pages/about').then((m) => m.AboutPage),
   },
+  {
+    path: 'playground',
+    title: 'Playground · Continuous SSR',
+    loadComponent: () => import('./pages/playground').then((m) => m.PlaygroundPage),
+  },
+  /** Old address; redirects are skipped by snapshot discovery and answered by the engine. */
+  { path: 'legacy', redirectTo: 'about' },
+  {
+    path: '**',
+    title: 'Not found · Continuous SSR',
+    loadComponent: () => import('./pages/not-found').then((m) => m.NotFoundPage),
+  },
 ];

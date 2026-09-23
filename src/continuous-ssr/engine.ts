@@ -1,5 +1,6 @@
 import { ApplicationRef, EnvironmentInjector } from '@angular/core';
 import { ɵInlineCriticalCssProcessor as InlineCriticalCssProcessor } from '@angular/ssr';
+import type { ServerRoute } from '@angular/ssr';
 import type { Subscription } from 'rxjs';
 import {
   CONTINUOUS_RENDERING_OPTIONS,
@@ -11,6 +12,7 @@ import { Logger, NOOP_LOGGER, ms } from './log';
 import { RenderLoop, RenderRunStats } from './render-loop';
 import { ContinuousBootstrap, ContinuousRenderer } from './renderer';
 import { RouteDependencyTracker } from './route-dependencies';
+import { matchServerRoute, serverRoutesOf } from './server-routes';
 import { registeredSharedSignals } from './shared-state';
 import { MemorySnapshotStore, Snapshot, SnapshotStore, SnapshotSummary } from './snapshot-store';
 
@@ -98,6 +100,8 @@ export class ContinuousAppEngine {
   private recycles = 0;
   private recycling: Promise<void> | undefined;
   private stopped = false;
+  /** Angular's server routes, for the status and headers a snapshot response should carry. */
+  private serverRoutes: readonly ServerRoute[] = [];
 
   private constructor(
     private readonly options: ContinuousAppEngineOptions,
@@ -227,14 +231,17 @@ export class ContinuousAppEngine {
       return null;
     }
 
+    const serverRoute = matchServerRoute(path, this.serverRoutes);
     const headers = new Headers({
       'Content-Type': 'text/html; charset=utf-8',
+      ...serverRoute?.headers,
       ETag: snapshot.etag,
       'Cache-Control': this.config.cacheControl ?? DEFAULT_CACHE_CONTROL,
       'X-SSR-Mode': 'continuous',
       'X-SSR-Version': String(snapshot.version),
       'X-SSR-Rendered-At': snapshot.renderedAt,
     });
+    const status = serverRoute && 'status' in serverRoute ? (serverRoute.status ?? 200) : 200;
 
     if (request.headers.get('if-none-match') === snapshot.etag) {
       this.log.info('request served', { path, mode: 'continuous', status: 304, version: snapshot.version });
@@ -243,11 +250,11 @@ export class ContinuousAppEngine {
     this.log.info('request served', {
       path,
       mode: 'continuous',
-      status: 200,
+      status,
       version: snapshot.version,
       age: ms(Date.now() - Date.parse(snapshot.renderedAt)),
     });
-    return new Response(request.method === 'HEAD' ? null : snapshot.html, { status: 200, headers });
+    return new Response(request.method === 'HEAD' ? null : snapshot.html, { status, headers });
   }
 
   stop(): void {
@@ -272,6 +279,7 @@ export class ContinuousAppEngine {
     });
 
     const config = renderer.injector.get(CONTINUOUS_RENDERING_OPTIONS, null) ?? {};
+    this.serverRoutes = serverRoutesOf(renderer.injector);
     const routes = () =>
       resolveSnapshotRoutes(renderer.injector, config, (fn) => renderer.withoutTransferState(fn));
     log.info('continuous rendering configured', {

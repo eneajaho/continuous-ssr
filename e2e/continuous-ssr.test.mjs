@@ -293,3 +293,26 @@ test('personal pages and signed-in visitors render per request, light visitors s
   const me = await (await fetch(`${BASE}/api/me`, { headers: { cookie: 'visitor=Bob' } })).json();
   assert.deepEqual(me, { name: 'Bob', signedIn: false });
 });
+
+test('honours Angular server routes: client-only, 404 wildcard, redirects, headers', async () => {
+  const snapshots = (await state()).snapshots.map((s) => s.path);
+  assert.ok(!snapshots.includes('/playground'), 'client-only route never snapshotted');
+  assert.ok(!snapshots.includes('/legacy'), 'redirect never snapshotted');
+
+  const playground = await fetch(`${BASE}/playground`);
+  assert.equal(playground.headers.get('x-ssr-mode'), 'per-request');
+  assert.ok(!(await playground.text()).includes('<app-playground'), 'client route ships no rendered component');
+
+  const missing = await fetch(`${BASE}/nowhere`);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get('x-ssr-mode'), 'per-request');
+  assert.ok((await missing.text()).includes('<app-not-found'));
+
+  const legacy = await fetch(`${BASE}/legacy`, { redirect: 'manual' });
+  assert.ok([301, 302, 303, 307, 308].includes(legacy.status), `redirect status ${legacy.status}`);
+  assert.match(legacy.headers.get('location'), /\/about$/);
+
+  const about = await fetch(`${BASE}/about`);
+  assert.equal(about.headers.get('x-ssr-mode'), 'continuous');
+  assert.equal(about.headers.get('x-section'), 'about', 'server route header applied to the snapshot');
+});

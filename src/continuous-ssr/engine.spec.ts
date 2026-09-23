@@ -1,6 +1,6 @@
 import { Component, Service, destroyPlatform, inject, input, signal } from '@angular/core';
 import { BootstrapContext, bootstrapApplication, provideClientHydration } from '@angular/platform-browser';
-import { provideServerRendering } from '@angular/platform-server';
+import { RenderMode, provideServerRendering, withRoutes } from '@angular/ssr';
 import { RouterOutlet, provideRouter, withComponentInputBinding } from '@angular/router';
 import { provideContinuousRendering } from './config';
 import { ContinuousAppEngine } from './engine';
@@ -31,6 +31,9 @@ class AboutPage {
   protected readonly feed = inject(Feed);
 }
 
+@Component({ selector: 'app-client', template: '<h1>Client only</h1>' })
+class ClientPage {}
+
 @Component({ selector: 'app-root', imports: [RouterOutlet], template: '<router-outlet />' })
 class TestApp {}
 
@@ -42,7 +45,13 @@ const bootstrap = (context: BootstrapContext) =>
     TestApp,
     {
       providers: [
-        provideServerRendering(),
+        provideServerRendering(
+          withRoutes([
+            { path: 'about', renderMode: RenderMode.Server, headers: { 'X-Section': 'about' }, status: 203 },
+            { path: 'playground', renderMode: RenderMode.Client },
+            { path: '**', renderMode: RenderMode.Server },
+          ]),
+        ),
         provideClientHydration(),
         provideRouter(
           [
@@ -50,6 +59,7 @@ const bootstrap = (context: BootstrapContext) =>
             { path: 'about', component: AboutPage },
             { path: 'items/:id', component: ItemPage },
             { path: 'secret', component: AboutPage },
+            { path: 'playground', component: ClientPage },
           ],
           withComponentInputBinding(),
         ),
@@ -119,6 +129,14 @@ describe('ContinuousAppEngine', () => {
     expect(await (await engine.handle(new Request('http://localhost/items/3')))!.text()).toContain('<h1>Item 3</h1>');
     engine.injector.get(Feed).itemIds.set(['1', '2']);
     await engine.refresh('restore');
+  });
+
+  it('applies the matching server route status and headers to snapshot responses', async () => {
+    const response = await engine.handle(new Request('http://localhost/about'));
+
+    expect(response?.status).toBe(203);
+    expect(response?.headers.get('x-section')).toBe('about');
+    expect((await engine.handle(new Request('http://localhost/')))?.status).toBe(200);
   });
 
   it('answers requests for snapshot paths with hydration-ready HTML and cache headers', async () => {

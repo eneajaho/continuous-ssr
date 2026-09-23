@@ -6,6 +6,7 @@ import {
   runInInjectionContext,
 } from '@angular/core';
 import { ActivatedRouteSnapshot, BaseRouteReuseStrategy, RouteReuseStrategy, Router, Routes } from '@angular/router';
+import { isServerRendered, serverRoutesOf } from './server-routes';
 
 export type RouteParams = Readonly<Record<string, string>>;
 
@@ -144,8 +145,10 @@ export function isExcluded(path: string, exclude: readonly (string | RegExp)[] =
 
 /**
  * The full list of paths to snapshot right now: discovered static routes, explicit paths and
- * expanded parameterised routes, minus exclusions. `runParams` runs a params function; the
- * engine uses it to discard transfer state the function leaves behind.
+ * expanded parameterised routes, minus exclusions and minus paths whose Angular server route
+ * is not `RenderMode.Server` (client-only and prerendered routes keep their treatment).
+ * `runParams` runs a params function; the engine uses it to discard transfer state the
+ * function leaves behind.
  */
 export async function resolveSnapshotRoutes(
   injector: EnvironmentInjector,
@@ -167,5 +170,8 @@ export async function resolveSnapshotRoutes(
       paths.push(expandRoute(route.path, params));
     }
   }
-  return Array.from(new Set(paths)).filter((path) => !isExcluded(path, options.exclude));
+  const serverRoutes = serverRoutesOf(injector);
+  return Array.from(new Set(paths)).filter(
+    (path) => !isExcluded(path, options.exclude) && isServerRendered(path, serverRoutes),
+  );
 }
