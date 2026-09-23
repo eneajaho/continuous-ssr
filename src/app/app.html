@@ -1,0 +1,28 @@
+<header class="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+  <nav class="mx-auto flex max-w-4xl items-center justify-between gap-4 px-4 py-3" aria-label="Main">
+    <a
+      routerLink="/"
+      class="rounded-md font-semibold text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 dark:text-zinc-50"
+    >
+      Continuous SSR
+    </a>
+    <ul class="flex gap-1">
+      @for (link of links; track link.path) {
+        <li>
+          <a
+            [routerLink]="link.path"
+            routerLinkActive="bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
+            [routerLinkActiveOptions]="{ exact: link.exact }"
+            ariaCurrentWhenActive="page"
+            class="block rounded-md px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          >
+            {{ link.label }}
+          </a>
+        </li>
+      }
+    </ul>
+  </nav>
+</header>
+<main class="mx-auto max-w-4xl px-4 py-8">
+  <router-outlet />
+</main>
