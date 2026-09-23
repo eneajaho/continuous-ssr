@@ -17,6 +17,27 @@ export const routes: Routes = [
     loadComponent: () => import('./pages/news-article').then((m) => m.NewsArticlePage),
   },
   {
+    path: 'docs',
+    loadComponent: () => import('./pages/docs/docs-layout').then((m) => m.DocsLayout),
+    children: [
+      {
+        path: '',
+        title: 'Docs · Continuous SSR',
+        loadComponent: () => import('./pages/docs/docs-pages').then((m) => m.DocsOverviewPage),
+      },
+      {
+        path: 'getting-started',
+        title: 'Getting started · Continuous SSR',
+        loadComponent: () => import('./pages/docs/docs-pages').then((m) => m.DocsGettingStartedPage),
+      },
+      {
+        path: 'api',
+        title: 'API · Continuous SSR',
+        loadComponent: () => import('./pages/docs/docs-pages').then((m) => m.DocsApiPage),
+      },
+    ],
+  },
+  {
     path: 'account',
     title: 'Account · Continuous SSR',
     loadComponent: () => import('./pages/account').then((m) => m.AccountPage),

@@ -295,6 +295,25 @@ app.post('/api/announce', express.json(), (req, res) => {
   res.json({ banner: text || null });
 });
 
+/**
+ * For changes the application cannot see, such as an external CMS or API: re-render everything,
+ * or only the `paths` in the body. Wire your data source's webhook to this.
+ */
+app.post('/api/webhook', express.json(), async (req, res) => {
+  if (!continuous || continuous.role !== 'render') {
+    res.status(503).json({ error: 'continuous renderer is not running' });
+    return;
+  }
+  const body: unknown = req.body;
+  const paths =
+    typeof body === 'object' && body !== null && 'paths' in body && Array.isArray(body.paths)
+      ? body.paths.filter((path): path is string => typeof path === 'string')
+      : undefined;
+  log.info('webhook received', { paths: paths?.join(',') ?? 'all' });
+  await continuous.refresh('webhook', paths);
+  res.json({ version: continuous.version, paths: paths ?? 'all' });
+});
+
 /** Replaces the live application with a fresh one; the recycle policy does this on its own too. */
 app.post('/api/recycle', async (_req, res) => {
   if (!continuous || continuous.role !== 'render') {

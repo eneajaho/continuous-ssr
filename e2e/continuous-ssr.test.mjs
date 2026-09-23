@@ -330,3 +330,27 @@ test('head tags set by a page travel with that page only', async () => {
     assert.ok(!html.includes('<title>Article'), `${path} has its own title`);
   }
 });
+
+test('nested static routes are discovered and a webhook refreshes only the listed paths', async () => {
+  const snapshots = (await state()).snapshots.map((s) => s.path);
+  for (const path of ['/docs', '/docs/getting-started', '/docs/api']) {
+    assert.ok(snapshots.includes(path), `${path} discovered`);
+  }
+  const api = await fetch(`${BASE}/docs/api`);
+  assert.equal(api.headers.get('x-ssr-mode'), 'continuous');
+  const html = await api.text();
+  assert.ok(html.includes('<app-docs-layout') && html.includes('<app-docs-api'));
+  assert.ok(html.includes('<title>API · Continuous SSR</title>'));
+
+  const before = Number((await fetch(`${BASE}/news`)).headers.get('x-ssr-version'));
+  const webhook = await fetch(`${BASE}/api/webhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: ['/news'] }),
+  });
+  assert.equal(webhook.status, 200);
+  const health = await (await fetch(`${BASE}/healthz`)).json();
+  assert.match(health.lastRun.reasons, /webhook/);
+  assert.equal(health.lastRun.routes, 1);
+  assert.ok(Number((await fetch(`${BASE}/news`)).headers.get('x-ssr-version')) > before);
+});

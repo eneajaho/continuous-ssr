@@ -44,6 +44,8 @@ import { Announcements } from '../announcements';
         <li><strong>News</strong>: route data through <code class="text-sm">httpResource</code>, transferred with this route only and fetched again on every re-render.</li>
         <li><strong>News article</strong>: a parameterised route with one snapshot per article, instances listed from the feed.</li>
         <li><strong>About</strong>: this banner is route-local server state through <code class="text-sm">transferredState</code>; changing it re-renders this page alone. Its server route adds an <code class="text-sm">X-Section</code> header.</li>
+        <li><strong>Docs</strong>: a layout route with three nested static children, all discovered and snapshotted.</li>
+        <li><strong>Webhook</strong>: <code class="text-sm">POST /api/webhook</code> re-renders everything or just the listed paths, for data the app cannot watch.</li>
         <li><strong>Account</strong>: excluded from snapshots, rendered per request with the request's cookies; signing in switches every route to per-request rendering.</li>
         <li><a routerLink="/playground" class="font-medium text-emerald-800 hover:underline dark:text-emerald-300">Playground</a>: <code class="text-sm">RenderMode.Client</code> in the server routes, so it is never snapshotted and may use browser APIs.</li>
         <li><a routerLink="/legacy" class="font-medium text-emerald-800 hover:underline dark:text-emerald-300">/legacy</a> redirects, <a routerLink="/nowhere" class="font-medium text-emerald-800 hover:underline dark:text-emerald-300">/nowhere</a> is the 404 page: both are answered per request.</li>
