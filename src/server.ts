@@ -6,8 +6,6 @@ import {
   writeResponseToNodeResponse,
 } from '@angular/ssr/node';
 import express from 'express';
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Announcements } from './app/announcements';
 import type { LiveDataStore, LiveState } from './app/live-data.store';
@@ -79,34 +77,67 @@ function createSnapshotStore(entry: ServerEntry): SnapshotStore | undefined {
   return undefined;
 }
 
+/** What the built `main.server.mjs` exports on top of `src/main.server.ts`: Angular's server app accessor. */
+interface AngularServerAppAccess {
+  readonly manifest: {
+    readonly assets: Readonly<Record<string, { text(): Promise<string> } | undefined>>;
+    readonly inlineCriticalCss?: boolean;
+  };
+}
+
 /**
- * Starts the continuous engine from the built application bundle next to this file. Importing
- * the bundle statically would duplicate Angular into the server entry; loading it at runtime
- * shares one copy with the per-request engine. Resolves with nothing under `ng serve`, where
- * there is no built `index.server.html`, and per-request rendering carries on alone.
+ * Loads the application bundle next to this file, in production (`dist/.../server`) and under
+ * `ng serve` (the dev server's virtual root) alike. Importing it statically would duplicate
+ * Angular into the server entry; loading it at runtime shares one copy with the per-request
+ * engine. Its manifest provides the template and assets, so nothing is read from disk.
  */
-async function startContinuousRendering(): Promise<ContinuousAppEngine | undefined> {
-  const indexPath = join(serverDistFolder, 'index.server.html');
-  if (!existsSync(indexPath)) {
-    log.warn('index.server.html not found next to the server bundle; per-request rendering only');
-    return undefined;
-  }
-  const started = performance.now();
+async function loadEntry(): Promise<{ entry: ServerEntry; document: string; readBrowserAsset?: (f: string) => Promise<string> }> {
   const specifier = new URL('./main.server.mjs', import.meta.url).href;
-  const [document, entry] = await Promise.all([
-    readFile(indexPath, 'utf8'),
-    import(/* @vite-ignore */ specifier) as Promise<ServerEntry>,
-  ]);
+  const entry = (await import(/* @vite-ignore */ specifier)) as ServerEntry & {
+    ɵgetOrCreateAngularServerApp: () => AngularServerAppAccess;
+  };
+  const { manifest } = entry.ɵgetOrCreateAngularServerApp();
+  const asset = async (name: string) => {
+    const found = manifest.assets[name];
+    if (!found) {
+      throw new Error(`application manifest has no asset "${name}"`);
+    }
+    return found.text();
+  };
+  return {
+    entry,
+    document: await asset('index.server.html'),
+    readBrowserAsset: manifest.inlineCriticalCss ? asset : undefined,
+  };
+}
+
+let starting: Promise<ContinuousAppEngine | undefined> | undefined;
+
+/**
+ * Starts the continuous engine once. Production starts it at boot; the dev server starts it
+ * on its first request, for the origin that request came in on.
+ */
+function startContinuousRendering(origin = ORIGIN): Promise<ContinuousAppEngine | undefined> {
+  starting ??= startContinuousRenderingNow(origin).catch((error) => {
+    log.error('failed to start the continuous renderer', undefined, error);
+    return undefined;
+  });
+  return starting;
+}
+
+async function startContinuousRenderingNow(origin: string): Promise<ContinuousAppEngine | undefined> {
+  const started = performance.now();
+  const { entry, document, readBrowserAsset } = await loadEntry();
   serverEntry = entry;
-  log.debug('application bundle loaded', { took: ms(performance.now() - started) });
+  log.debug('application bundle loaded', { took: ms(performance.now() - started), origin });
 
   const engine = await entry.ContinuousAppEngine.start({
     bootstrap: entry.default,
     document,
-    origin: ORIGIN,
+    origin,
     role: SSR_ROLE,
     store: createSnapshotStore(entry),
-    readBrowserAsset: (fileName) => readFile(join(browserDistFolder, fileName), 'utf8'),
+    readBrowserAsset,
     // Signed-in visitors get personal per-request renders on every route; everyone else,
     // including visitors with the light `visitor` cookie, gets snapshots.
     shouldServeSnapshot: (request) => !cookie(request.headers.get('cookie') ?? undefined, 'session'),
@@ -299,6 +330,11 @@ app.use(
  * Snapshots first, then Angular's per-request engine for everything else.
  */
 app.use(async (req, res, next) => {
+  if (!starting) {
+    // Not started at boot (the dev server never runs the block below): start now, for the
+    // origin this request came in on, and let this request fall through to per-request rendering.
+    void startContinuousRendering(`${req.protocol}://${req.headers.host ?? `localhost:${PORT}`}`);
+  }
   const response = await continuous?.handle(createWebRequestFromNodeRequest(req)).catch(next);
   if (response) {
     writeResponseToNodeResponse(response, res).catch(next);
@@ -336,9 +372,7 @@ if (isMainModule(import.meta.url) || process.env['pm_id']) {
     log.info('listening', { url: `http://localhost:${PORT}` });
   });
 
-  startContinuousRendering().catch((error) => {
-    log.error('failed to start the continuous renderer', undefined, error);
-  });
+  void startContinuousRendering();
 }
 
 /**
