@@ -1,6 +1,7 @@
 import { DatePipe } from '@angular/common';
 import { httpResource } from '@angular/common/http';
-import { Component, input } from '@angular/core';
+import { Component, effect, inject, input } from '@angular/core';
+import { Meta } from '@angular/platform-browser';
 import { RouterLink } from '@angular/router';
 import { NewsItem } from './news';
 
@@ -51,4 +52,16 @@ export class NewsArticlePage {
   /** Bound from the route parameter through `withComponentInputBinding`. */
   readonly id = input.required<string>();
   protected readonly article = httpResource<NewsArticle>(() => `/api/news/${encodeURIComponent(this.id())}`);
+  private readonly meta = inject(Meta);
+
+  constructor() {
+    // Head tags belong to this route's snapshot only; the engine resets the head between routes.
+    effect(() => {
+      const article = this.article.value();
+      if (article) {
+        this.meta.updateTag({ name: 'description', content: article.summary });
+        this.meta.updateTag({ property: 'og:title', content: article.title });
+      }
+    });
+  }
 }

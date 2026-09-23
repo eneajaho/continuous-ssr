@@ -16,6 +16,7 @@ import {
   ɵrenderInternal as renderInternal,
 } from '@angular/platform-server';
 import { Router } from '@angular/router';
+import { HeadBaseline, captureHead, resetHead } from './head-scope';
 import { keepHttpTransferCacheActive } from './http-transfer-cache';
 import { Logger, NOOP_LOGGER, kb, ms } from './log';
 import { stripSerializationArtifacts } from './serialization-artifacts';
@@ -58,6 +59,7 @@ export class ContinuousRenderer {
     private readonly appRef: ApplicationRef,
     private readonly origin: string,
     private readonly scope: TransferStateScope,
+    private readonly head: HeadBaseline,
     private readonly log: Logger,
   ) {}
 
@@ -73,6 +75,9 @@ export class ContinuousRenderer {
     ]);
 
     try {
+      // The head as it comes from the template, before the initial navigation lets the first
+      // page add its own tags: what every route starts from.
+      const head = captureHead(platformRef.injector.get(DOCUMENT));
       const appRef = await options.bootstrap({ platformRef });
       const bootstrapped = performance.now();
       log.info('application bootstrapped', { took: ms(bootstrapped - started) });
@@ -99,7 +104,7 @@ export class ContinuousRenderer {
         log.debug('transfer state attributed to the initial route', { keys: written.join(',') });
       }
 
-      return new ContinuousRenderer(platformRef, appRef, initial.origin, scope, log);
+      return new ContinuousRenderer(platformRef, appRef, initial.origin, scope, head, log);
     } catch (error) {
       log.error('bootstrap failed, destroying platform', undefined, error);
       platformRef.destroy();
@@ -217,6 +222,10 @@ export class ContinuousRenderer {
       evicted = store ? this.scope.evict(store, route) : [];
       // Everything written from here on, navigation included, belongs to this route.
       before = store ? this.scope.capture(store) : {};
+      const headChanges = resetHead(injector.get(DOCUMENT), this.head);
+      if (headChanges) {
+        this.log.debug('head reset to baseline before navigation', { changes: headChanges });
+      }
       const navigated = await router.navigateByUrl(route);
       if (!navigated) {
         this.log.warn('navigation rejected', { from, to: route });

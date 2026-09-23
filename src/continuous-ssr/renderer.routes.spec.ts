@@ -1,4 +1,5 @@
 import { Component, TransferState, destroyPlatform, inject, makeStateKey } from '@angular/core';
+import { DOCUMENT } from '@angular/common';
 import { BootstrapContext, bootstrapApplication, provideClientHydration } from '@angular/platform-browser';
 import { provideServerRendering } from '@angular/platform-server';
 import { RouterOutlet, provideRouter } from '@angular/router';
@@ -14,6 +15,13 @@ class PageA {
   constructor() {
     // Stands in for an HTTP call whose response lands in the transfer cache.
     inject(TransferState).set(A_KEY, `a-fetch-${++fetches}`);
+    // What Meta.updateTag does, with the document's own elements (the test runner mixes DOM
+    // adapters, which makes Meta create foreign nodes here; production uses Meta directly).
+    const doc = inject(DOCUMENT);
+    const tag = doc.createElement('meta');
+    tag.setAttribute('name', 'description');
+    tag.setAttribute('content', 'page a');
+    doc.head.appendChild(tag);
   }
 }
 
@@ -38,7 +46,7 @@ const bootstrap = (context: BootstrapContext) =>
         provideServerRendering(),
         provideClientHydration(),
         provideRouter([
-          { path: 'a', component: PageA },
+          { path: 'a', component: PageA, title: 'Page A' },
           { path: 'b', component: PageB },
         ]),
       ],
@@ -83,6 +91,16 @@ describe('ContinuousRenderer transfer state scoping', () => {
     expect(stateB['shared']).toBe('everywhere');
     expect(stateB['a-data']).toBeUndefined();
     expect(stateB['__nghData__']).toBeDefined();
+  });
+
+  it('resets head tags and the title between routes', async () => {
+    const htmlB = await renderer.render('/b');
+    expect(htmlB).not.toContain('name="description"');
+    expect(htmlB).toContain('<title>test</title>');
+
+    const htmlA = await renderer.render('/a');
+    expect(htmlA).toContain('content="page a"');
+    expect(htmlA).toContain('<title>Page A</title>');
   });
 
   it('keeps withheld keys in the live store between renders', () => {

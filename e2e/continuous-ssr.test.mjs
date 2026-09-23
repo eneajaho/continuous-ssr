@@ -316,3 +316,17 @@ test('honours Angular server routes: client-only, 404 wildcard, redirects, heade
   assert.equal(about.headers.get('x-ssr-mode'), 'continuous');
   assert.equal(about.headers.get('x-section'), 'about', 'server route header applied to the snapshot');
 });
+
+test('head tags set by a page travel with that page only', async () => {
+  const article = await (await fetch(`${BASE}/news/1`)).text();
+  assert.match(article, /<meta name="description" content="[^"]+">/);
+  assert.match(article, /<meta property="og:title" content="Snapshot cache keeps serving">/);
+  assert.ok(article.includes('<title>Article · Continuous SSR</title>'));
+
+  for (const path of ['/', '/about', '/news']) {
+    const html = await (await fetch(`${BASE}${path}`)).text();
+    assert.ok(!html.includes('name="description"'), `${path} has no leaked description`);
+    assert.ok(!html.includes('og:title'), `${path} has no leaked og:title`);
+    assert.ok(!html.includes('<title>Article'), `${path} has its own title`);
+  }
+});
