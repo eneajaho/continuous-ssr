@@ -117,7 +117,8 @@ test('a published message reaches the next snapshot without duplicated artifacts
   assert.equal(occurrences(html, '<!--nghm-->'), 1);
   assert.equal(transferState(html)['live-state'].message, message);
   assert.ok(!html.includes('Hello from the continuous renderer'));
-  assert.ok((await state()).version > before.version);
+  // The version advances when the whole run finishes, which may be after this snapshot landed.
+  await waitFor(async () => (await state()).version > before.version, { label: 'run version to advance' });
 });
 
 test('the server ticker keeps producing new snapshot versions', async () => {
@@ -286,6 +287,8 @@ test('personal pages and signed-in visitors render per request, light visitors s
   assert.equal(signedIn.headers.get('x-ssr-mode'), 'per-request');
   const signedInHtml = await signedIn.text();
   assert.ok(signedInHtml.includes('Hi, Ada'), 'server-rendered greeting for signed-in visitors');
+  const live = (await state()).state;
+  assert.ok(signedInHtml.includes(live.message), 'per-request render fetched the live state itself');
 
   const visitor = await fetch(`${BASE}/`, { headers: { cookie: 'visitor=Bob' } });
   assert.equal(visitor.headers.get('x-ssr-mode'), 'continuous');
