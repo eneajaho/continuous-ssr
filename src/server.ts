@@ -62,6 +62,16 @@ interface ServerEntry {
   readonly Announcements: typeof Announcements;
 }
 
+function cookie(header: string | undefined, name: string): string | null {
+  const match = header?.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function sessionOf(cookieHeader: string | undefined) {
+  const session = cookie(cookieHeader, 'session');
+  return session ? { name: session, signedIn: true } : { name: cookie(cookieHeader, 'visitor'), signedIn: false };
+}
+
 function createSnapshotStore(entry: ServerEntry): SnapshotStore | undefined {
   if (SNAPSHOT_STORE.startsWith('file:')) {
     return new entry.FileSnapshotStore(SNAPSHOT_STORE.slice('file:'.length));
@@ -97,6 +107,9 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
     role: SSR_ROLE,
     store: createSnapshotStore(entry),
     readBrowserAsset: (fileName) => readFile(join(browserDistFolder, fileName), 'utf8'),
+    // Signed-in visitors get personal per-request renders on every route; everyone else,
+    // including visitors with the light `visitor` cookie, gets snapshots.
+    shouldServeSnapshot: (request) => !cookie(request.headers.get('cookie') ?? undefined, 'session'),
     // Demo: seed the live state of every fresh application (at start and after a recycle).
     // A real app's services would fetch their own data on bootstrap; every change they make
     // afterwards re-renders the snapshots automatically.
@@ -198,6 +211,43 @@ app.post('/api/increment', (_req, res) => {
   lastKnownState = liveStore.snapshot();
   log.info('live state changed', { source: 'api:increment', counter: liveStore.counter() });
   res.json(liveStore.snapshot());
+});
+
+/** Who the request belongs to, from its cookies. */
+app.get('/api/me', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(sessionOf(req.headers.cookie));
+});
+
+/** Sign in: the `session` cookie switches this visitor to per-request rendering everywhere. */
+app.post('/api/session', express.json(), (req, res) => {
+  const body: unknown = req.body;
+  const name =
+    typeof body === 'object' && body !== null && 'name' in body && typeof body.name === 'string' ? body.name.trim() : '';
+  if (name.length === 0 || name.length > 40) {
+    res.status(400).json({ error: 'name must be between 1 and 40 characters' });
+    return;
+  }
+  res.setHeader('Set-Cookie', `session=${encodeURIComponent(name)}; Path=/; SameSite=Lax`);
+  res.json({ name, signedIn: true });
+});
+
+app.delete('/api/session', (_req, res) => {
+  res.setHeader('Set-Cookie', ['session=; Path=/; Max-Age=0', 'visitor=; Path=/; Max-Age=0']);
+  res.json({ name: null, signedIn: false });
+});
+
+/** Light personalisation: the `visitor` cookie is read in the browser only; snapshots stay. */
+app.post('/api/visitor', express.json(), (req, res) => {
+  const body: unknown = req.body;
+  const name =
+    typeof body === 'object' && body !== null && 'name' in body && typeof body.name === 'string' ? body.name.trim() : '';
+  if (name.length === 0 || name.length > 40) {
+    res.status(400).json({ error: 'name must be between 1 and 40 characters' });
+    return;
+  }
+  res.setHeader('Set-Cookie', `visitor=${encodeURIComponent(name)}; Path=/; SameSite=Lax`);
+  res.json({ name, signedIn: false });
 });
 
 /** Route-local state: only the about page depends on it, so only its snapshot is re-rendered. */

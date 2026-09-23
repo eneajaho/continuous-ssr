@@ -275,3 +275,21 @@ test('route-local state re-renders only the route that depends on it', async () 
   assert.equal(transferState(html)['about-banner'], text, 'banner travels in the about transfer state');
   assert.equal(transferState(await (await fetch(`${BASE}/`)).text())['about-banner'], undefined, 'not in other snapshots');
 });
+
+test('personal pages and signed-in visitors render per request, light visitors stay on snapshots', async () => {
+  const account = await fetch(`${BASE}/account`);
+  assert.equal(account.headers.get('x-ssr-mode'), 'per-request');
+  assert.ok((await account.text()).includes('<app-account'));
+  assert.ok(!(await state()).snapshots.some((s) => s.path === '/account'), 'account is never snapshotted');
+
+  const signedIn = await fetch(`${BASE}/`, { headers: { cookie: 'session=Ada' } });
+  assert.equal(signedIn.headers.get('x-ssr-mode'), 'per-request');
+  const signedInHtml = await signedIn.text();
+  assert.ok(signedInHtml.includes('Hi, Ada'), 'server-rendered greeting for signed-in visitors');
+
+  const visitor = await fetch(`${BASE}/`, { headers: { cookie: 'visitor=Bob' } });
+  assert.equal(visitor.headers.get('x-ssr-mode'), 'continuous');
+  assert.ok(!(await visitor.text()).includes('Bob'), 'no personal data in a snapshot');
+  const me = await (await fetch(`${BASE}/api/me`, { headers: { cookie: 'visitor=Bob' } })).json();
+  assert.deepEqual(me, { name: 'Bob', signedIn: false });
+});

@@ -200,7 +200,7 @@ describe('ContinuousAppEngine', () => {
     expect(await (await engine.handle(new Request('http://localhost/')))!.text()).toContain('<h1>after recycle</h1>');
   });
 
-  it('shares its store with a serve-only engine and notifies stored snapshots', async () => {
+  it('shares its store with a serve-only engine, notifies stored snapshots and honours the request policy', async () => {
     const stored: string[] = [];
     const store = new MemorySnapshotStore();
     engine.stop();
@@ -212,7 +212,10 @@ describe('ContinuousAppEngine', () => {
       onSnapshotStored: (snapshot) => {
         stored.push(snapshot.path);
       },
+      shouldServeSnapshot: (request) => !request.headers.get('cookie')?.includes('session='),
     });
+    expect(await renderer.handle(new Request('http://localhost/', { headers: { cookie: 'session=abc' } }))).toBeNull();
+    expect((await renderer.handle(new Request('http://localhost/', { headers: { cookie: 'theme=dark' } })))?.status).toBe(200);
     const server = await ContinuousAppEngine.start({
       bootstrap,
       document: DOCUMENT_TEMPLATE,

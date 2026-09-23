@@ -38,6 +38,12 @@ export interface ContinuousAppEngineOptions {
   /** Called after each snapshot lands in the store, e.g. to purge a CDN path. */
   readonly onSnapshotStored?: (snapshot: Snapshot) => void | Promise<void>;
   /**
+   * Decides per request whether a snapshot may answer it. Snapshots are the same for every
+   * visitor, so return `false` for requests that need a personal render, such as ones carrying
+   * a session cookie; they fall through to per-request rendering. Default: always `true`.
+   */
+  readonly shouldServeSnapshot?: (request: Request) => boolean;
+  /**
    * Reads a built browser asset by file name, e.g. `styles-ABC123.css`, so critical CSS can be
    * inlined into snapshots. Omit to skip inlining.
    */
@@ -212,6 +218,10 @@ export class ContinuousAppEngine {
       return null;
     }
     const path = new URL(request.url).pathname;
+    if (this.options.shouldServeSnapshot && !this.options.shouldServeSnapshot(request)) {
+      this.log.info('request bypasses snapshots', { path, mode: 'per-request' });
+      return null;
+    }
     const snapshot = await this.store.get(path);
     if (!snapshot) {
       return null;

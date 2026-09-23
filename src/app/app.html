@@ -6,7 +6,10 @@
     >
       Continuous SSR
     </a>
-    <ul class="flex gap-1">
+    <ul class="flex items-center gap-1">
+      @if (visitor.session().name; as name) {
+        <li class="px-2 text-sm text-zinc-600 dark:text-zinc-400" data-testid="greeting">Hi, {{ name }}</li>
+      }
       @for (link of links; track link.path) {
         <li>
           <a

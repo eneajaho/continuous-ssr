@@ -17,6 +17,11 @@ export const routes: Routes = [
     loadComponent: () => import('./pages/news-article').then((m) => m.NewsArticlePage),
   },
   {
+    path: 'account',
+    title: 'Account · Continuous SSR',
+    loadComponent: () => import('./pages/account').then((m) => m.AccountPage),
+  },
+  {
     path: 'about',
     title: 'About · Continuous SSR',
     loadComponent: () => import('./pages/about').then((m) => m.AboutPage),
