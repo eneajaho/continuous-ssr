@@ -18,6 +18,7 @@ import { Router } from '@angular/router';
 import { keepHttpTransferCacheActive } from './http-transfer-cache';
 import { Logger, NOOP_LOGGER, kb, ms } from './log';
 import { stripSerializationArtifacts } from './serialization-artifacts';
+import { registeredSharedStateKeys } from './shared-state';
 import { TransferStateScope, TransferStateStore, storeOf } from './transfer-state-scope';
 
 export type ContinuousBootstrap = (context: BootstrapContext) => Promise<ApplicationRef>;
@@ -33,8 +34,8 @@ export interface ContinuousRendererOptions {
   /** Value of the `ng-server-context` attribute on the root element. */
   readonly serverContext?: string;
   /**
-   * `TransferState` keys that belong to every snapshot, such as app-wide state a root service
-   * mirrors into the store. Everything else is attributed to the route that wrote it.
+   * `TransferState` keys that belong to every snapshot, on top of those created with
+   * `makeSharedStateKey`. Everything else is attributed to the route that wrote it.
    */
   readonly sharedStateKeys?: readonly string[];
   readonly log?: Logger;
@@ -49,6 +50,7 @@ export interface ContinuousRendererOptions {
 export class ContinuousRenderer {
   private queue: Promise<unknown> = Promise.resolve();
   private renders = 0;
+  private rendering = 0;
 
   private constructor(
     private readonly platformRef: PlatformRef,
@@ -81,7 +83,10 @@ export class ContinuousRenderer {
       });
 
       // Whatever the initial navigation wrote into TransferState belongs to the initial route.
-      const scope = new TransferStateScope(options.sharedStateKeys);
+      const scope = new TransferStateScope([
+        ...(options.sharedStateKeys ?? []),
+        ...registeredSharedStateKeys(),
+      ]);
       const initial = new URL(options.url);
       const transferState = appRef.injector.get(TransferState, null);
       if (transferState) {
@@ -115,6 +120,11 @@ export class ContinuousRenderer {
     return this.platformRef.destroyed;
   }
 
+  /** Whether a navigate-and-serialize cycle is in progress. */
+  get isRendering(): boolean {
+    return this.rendering > 0;
+  }
+
   /**
    * Navigates the live router to `url` when needed, waits for stability and serializes the
    * document. Resolves with the full HTML for that route.
@@ -126,7 +136,10 @@ export class ContinuousRenderer {
       if (waited > 1) {
         this.log.debug('render dequeued', { url, waited: ms(waited) });
       }
-      return this.renderNow(url);
+      this.rendering++;
+      return this.renderNow(url).finally(() => {
+        this.rendering--;
+      });
     });
     this.queue = run.catch(() => undefined);
     return run;

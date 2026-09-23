@@ -1,6 +1,6 @@
-import { TransferState } from '@angular/core';
+import { TransferState, makeStateKey } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { EMPTY_LIVE_STATE, LIVE_STATE_KEY, LiveDataStore } from './live-data.store';
+import { EMPTY_LIVE_STATE, LIVE_STATE_NAME, LiveDataStore, LiveState } from './live-data.store';
 
 describe('LiveDataStore', () => {
   it('starts from the empty state when nothing was transferred', () => {
@@ -10,7 +10,7 @@ describe('LiveDataStore', () => {
   });
 
   it('seeds itself from transferred state', () => {
-    TestBed.inject(TransferState).set(LIVE_STATE_KEY, {
+    TestBed.inject(TransferState).set(makeStateKey<LiveState>(LIVE_STATE_NAME), {
       counter: 7,
       message: 'from the server',
       updatedAt: '2026-09-23T10:00:00.000Z',

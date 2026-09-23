@@ -8,7 +8,7 @@ import {
 } from '@angular/core';
 import { BootstrapContext, bootstrapApplication, provideClientHydration } from '@angular/platform-browser';
 import { provideServerRendering } from '@angular/platform-server';
-import { ContinuousRenderer } from './continuous-renderer';
+import { ContinuousRenderer } from './renderer';
 
 @Component({
   selector: 'app-root',

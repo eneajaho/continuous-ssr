@@ -2,7 +2,7 @@ import { Component, TransferState, destroyPlatform, inject, makeStateKey } from 
 import { BootstrapContext, bootstrapApplication, provideClientHydration } from '@angular/platform-browser';
 import { provideServerRendering } from '@angular/platform-server';
 import { RouterOutlet, provideRouter } from '@angular/router';
-import { ContinuousRenderer } from './continuous-renderer';
+import { ContinuousRenderer } from './renderer';
 
 const A_KEY = makeStateKey<string>('a-data');
 const B_KEY = makeStateKey<string>('b-data');

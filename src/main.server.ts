@@ -7,8 +7,9 @@ const bootstrap = (context: BootstrapContext) => bootstrapApplication(App, confi
 export default bootstrap;
 
 /**
- * Re-exported so the server entry can reach them through the built `main.server.mjs`,
- * sharing one copy of Angular with the per-request engine instead of bundling a second one.
+ * The server entry loads this bundle at runtime and starts the engine from it, so the engine
+ * shares this bundle's copy of Angular with the per-request renderer.
  */
-export { LIVE_STATE_KEY, LiveDataStore } from './app/live-data.store';
-export { ContinuousRenderer } from './server/continuous-renderer';
+export { ContinuousAppEngine } from './continuous-ssr';
+/** Demo only: lets the API endpoints in `server.ts` mutate the live state. */
+export { LiveDataStore } from './app/live-data.store';

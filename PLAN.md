@@ -37,16 +37,19 @@ task, so `await appRef.whenStable()` after a mutation runs change detection firs
                  └────────────────────────────────────────────────────────────────────┘
 ```
 
-Files:
+Files (`src/continuous-ssr` is the reusable engine, `src/app` the demo app, `src/server.ts` the Express glue):
 
-- `src/server/serialization-artifacts.ts` — pure DOM function `stripSerializationArtifacts(doc, appId)`.
-- `src/server/continuous-renderer.ts` — owns `platformServer` + `ApplicationRef`; `render(url)` serialized through a queue.
-- `src/server/snapshot-store.ts` — in-memory `Map<pathname, Snapshot>`.
-- `src/server/render-loop.ts` — `refreshAll()` / `invalidate()` with coalescing and a version counter.
-- `src/server.ts` — wires renderer, ticker, `/api/state` endpoints, cache-first request handler, engine fallback.
-- `src/app/live-data.store.ts` — `@Service` store with signals; server writes it into `TransferState`, browser reads it back.
-- `src/app/pages/dashboard.ts`, `src/app/pages/news.ts`, `src/app/pages/about.ts` — lazy routes; dashboard shows the live state and posts a new message, news fetches `/api/news` through `httpResource`.
-- `src/server/transfer-state-scope.ts`, `src/server/http-transfer-cache.ts` — per-route transfer state, see below.
+- `serialization-artifacts.ts` — pure DOM function `stripSerializationArtifacts(doc, appId)`.
+- `renderer.ts` — owns `platformServer` + `ApplicationRef`; `render(url)` serialized through a queue.
+- `snapshot-store.ts` — in-memory `Map<pathname, Snapshot>`.
+- `render-loop.ts` — `refresh(reason)` with coalescing and a version counter.
+- `transfer-state-scope.ts`, `http-transfer-cache.ts` — per-route transfer state, see below.
+- `config.ts` — `provideContinuousRendering()` and static route discovery from the router config.
+- `shared-state.ts` — `sharedState()` / `makeSharedStateKey()` for app-wide state.
+- `engine.ts` — `ContinuousAppEngine`: warm-up, `handle(request)`, automatic re-render on `isStable`.
+- `src/server.ts` — loads the built bundle, starts the engine, mounts it in front of Angular's engine.
+- `src/app/live-data.store.ts` — demo state on `sharedState`.
+- `src/app/pages/*` — lazy routes; dashboard shows the live state and posts a new message, news fetches `/api/news` through `httpResource`.
 
 Constraints accepted: shared instance = no per-request context (public pages only); one live DOM per
 platform so routes render sequentially; continuous mode runs against the built output (`index.server.html`
@@ -75,7 +78,7 @@ Handling, in `ContinuousRenderer.renderNow` with `TransferStateScope`:
 1. `ng test` (vitest, jsdom):
    - `serialization-artifacts.spec.ts` — strips every artifact, leaves app content and `ngh` attributes alone.
    - `render-loop.spec.ts` — fake renderer: renders all routes, bumps version, coalesces concurrent invalidations.
-   - `continuous-renderer.spec.ts` — real `platformServer` + tiny component: two renders, state change visible,
+   - `renderer.spec.ts`, `renderer.routes.spec.ts`, `engine.spec.ts` — real `platformServer` + tiny apps: repeated renders, state change visible, per-route transfer state, auto re-render,
      exactly one state script / one integrity marker, `ngh` present, `TransferState` reflects latest state.
    - `live-data.store.spec.ts`, page specs — TestBed.
 2. `pnpm e2e` (`node --test`, against the built server): cache headers, state change → new snapshot,
