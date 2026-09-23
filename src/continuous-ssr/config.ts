@@ -1,12 +1,38 @@
-import { EnvironmentProviders, InjectionToken, makeEnvironmentProviders } from '@angular/core';
-import { Routes } from '@angular/router';
+import {
+  EnvironmentInjector,
+  EnvironmentProviders,
+  InjectionToken,
+  makeEnvironmentProviders,
+  runInInjectionContext,
+} from '@angular/core';
+import { Router, Routes } from '@angular/router';
+
+export type RouteParams = Readonly<Record<string, string>>;
+
+export interface ParameterisedRoute {
+  /** A route path with parameters, e.g. `news/:id`. */
+  readonly path: string;
+  /**
+   * Produces one params object per instance to snapshot, e.g. `[{ id: '1' }, { id: '2' }]`.
+   * Runs inside the live application's injection context before every render run, so it can
+   * `inject()` services; whatever it writes to `TransferState` is discarded.
+   */
+  readonly params: () => Promise<readonly RouteParams[]> | readonly RouteParams[];
+}
 
 export interface ContinuousRenderingOptions {
   /**
-   * Pathnames to keep snapshots for. Defaults to every static route in the router config
-   * (no parameters, no wildcards, no lazily loaded children).
+   * Routes to snapshot on top of the discovered ones: static paths, or parameterised routes
+   * expanded through their `params` function before every run.
    */
-  readonly routes?: readonly string[];
+  readonly routes?: readonly (string | ParameterisedRoute)[];
+  /**
+   * Discover every static route in the router config (no parameters, no wildcards, no lazily
+   * loaded children). Default `true`.
+   */
+  readonly discoverRoutes?: boolean;
+  /** Paths that never get a snapshot: exact strings or patterns. */
+  readonly exclude?: readonly (string | RegExp)[];
   /**
    * Re-render snapshots whenever the live application settles after a change of its own,
    * such as a signal written by a service. Default `true`.
@@ -71,4 +97,54 @@ export function discoverStaticRoutes(routes: Routes, prefix = ''): string[] {
     }
   }
   return Array.from(new Set(found));
+}
+
+/** Fills the parameters of `path` from `params`, e.g. `news/:id` + `{ id: '7' }` → `/news/7`. */
+export function expandRoute(path: string, params: RouteParams): string {
+  const filled = path
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .map((segment) => {
+      if (!segment.startsWith(':')) {
+        return segment;
+      }
+      const value = params[segment.slice(1)];
+      if (value === undefined) {
+        throw new Error(`Route "${path}" needs a "${segment.slice(1)}" parameter.`);
+      }
+      return encodeURIComponent(value);
+    });
+  return `/${filled.join('/')}`;
+}
+
+export function isExcluded(path: string, exclude: readonly (string | RegExp)[] = []): boolean {
+  return exclude.some((rule) => (typeof rule === 'string' ? rule === path : rule.test(path)));
+}
+
+/**
+ * The full list of paths to snapshot right now: discovered static routes, explicit paths and
+ * expanded parameterised routes, minus exclusions. `runParams` runs a params function; the
+ * engine uses it to discard transfer state the function leaves behind.
+ */
+export async function resolveSnapshotRoutes(
+  injector: EnvironmentInjector,
+  options: ContinuousRenderingOptions,
+  runParams: <T>(fn: () => Promise<T> | T) => Promise<T> = (fn) =>
+    runInInjectionContext(injector, () => Promise.resolve(fn())),
+): Promise<string[]> {
+  const paths: string[] = [];
+  if (options.discoverRoutes ?? true) {
+    paths.push(...discoverStaticRoutes(injector.get(Router, null)?.config ?? []));
+  }
+  for (const route of options.routes ?? []) {
+    if (typeof route === 'string') {
+      paths.push(route.startsWith('/') ? route : `/${route}`);
+      continue;
+    }
+    const instances = await runParams(() => runInInjectionContext(injector, () => route.params()));
+    for (const params of instances) {
+      paths.push(expandRoute(route.path, params));
+    }
+  }
+  return Array.from(new Set(paths)).filter((path) => !isExcluded(path, options.exclude));
 }

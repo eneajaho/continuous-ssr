@@ -130,16 +130,30 @@ app.get('/api/state', async (_req, res) => {
 });
 
 /** The news page fetches this on the server; each call produces a fresh feed. */
-app.get('/api/news', (_req, res) => {
+function newsItems() {
   const tick = liveStore?.counter() ?? 0;
+  return [
+    { id: 1, title: 'Snapshot cache keeps serving', summary: `Snapshot version ${continuous?.version ?? 0} is live.` },
+    { id: 2, title: 'Live application stays warm', summary: `The store has ticked ${tick} times since start.` },
+    { id: 3, title: 'Transfer state is scoped', summary: 'This feed only travels with the news page.' },
+  ];
+}
+
+app.get('/api/news', (_req, res) => {
+  res.json({ generatedAt: new Date().toISOString(), tick: liveStore?.counter() ?? 0, items: newsItems() });
+});
+
+/** One article; the `/news/:id` snapshots are listed from the feed above. */
+app.get('/api/news/:id', (req, res) => {
+  const item = newsItems().find((candidate) => String(candidate.id) === req.params['id']);
+  if (!item) {
+    res.status(404).json({ error: 'no such article' });
+    return;
+  }
   res.json({
+    ...item,
     generatedAt: new Date().toISOString(),
-    tick,
-    items: [
-      { id: 1, title: 'Snapshot cache keeps serving', summary: `Snapshot version ${continuous?.version ?? 0} is live.` },
-      { id: 2, title: 'Live application stays warm', summary: `The store has ticked ${tick} times since start.` },
-      { id: 3, title: 'Transfer state is scoped', summary: 'This feed only travels with the news page.' },
-    ],
+    body: `${item.summary} Every article is its own snapshot with its own transfer state, listed from the feed before each render run.`,
   });
 });
 

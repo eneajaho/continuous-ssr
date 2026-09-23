@@ -1,7 +1,7 @@
-import { Component, Service, destroyPlatform, inject } from '@angular/core';
+import { Component, Service, destroyPlatform, inject, input, signal } from '@angular/core';
 import { BootstrapContext, bootstrapApplication, provideClientHydration } from '@angular/platform-browser';
 import { provideServerRendering } from '@angular/platform-server';
-import { RouterOutlet, provideRouter } from '@angular/router';
+import { RouterOutlet, provideRouter, withComponentInputBinding } from '@angular/router';
 import { provideContinuousRendering } from './config';
 import { ContinuousAppEngine } from './engine';
 import { sharedState } from './shared-state';
@@ -10,6 +10,13 @@ import { MemorySnapshotStore } from './snapshot-store';
 @Service()
 class Feed {
   readonly headline = sharedState('headline', 'first');
+  /** Not shared on purpose: changing it must not trigger a re-render by itself. */
+  readonly itemIds = signal(['1', '2']);
+}
+
+@Component({ selector: 'app-item', template: '<h1>Item {{ id() }}</h1>' })
+class ItemPage {
+  readonly id = input.required<string>();
 }
 
 @Component({ selector: 'app-home', template: '<h1>{{ feed.headline() }}</h1>' })
@@ -33,12 +40,20 @@ const bootstrap = (context: BootstrapContext) =>
       providers: [
         provideServerRendering(),
         provideClientHydration(),
-        provideRouter([
-          { path: '', component: HomePage },
-          { path: 'about', component: AboutPage },
-          { path: 'items/:id', component: AboutPage },
-        ]),
-        provideContinuousRendering({ debounceMs: 10 }),
+        provideRouter(
+          [
+            { path: '', component: HomePage },
+            { path: 'about', component: AboutPage },
+            { path: 'items/:id', component: ItemPage },
+            { path: 'secret', component: AboutPage },
+          ],
+          withComponentInputBinding(),
+        ),
+        provideContinuousRendering({
+          debounceMs: 10,
+          exclude: ['/secret'],
+          routes: [{ path: 'items/:id', params: () => inject(Feed).itemIds().map((id) => ({ id })) }],
+        }),
       ],
     },
     context,
@@ -75,9 +90,31 @@ describe('ContinuousAppEngine', () => {
   });
 
 
-  it('discovers static routes from the router config and warms them up', async () => {
-    expect((await engine.snapshots()).map((snapshot) => snapshot.path).sort()).toEqual(['/', '/about']);
+  it('discovers static routes, expands parameterised ones and honours exclusions', async () => {
+    expect((await engine.snapshots()).map((snapshot) => snapshot.path).sort()).toEqual([
+      '/',
+      '/about',
+      '/items/1',
+      '/items/2',
+    ]);
     expect(engine.version).toBe(1);
+    expect(await (await engine.handle(new Request('http://localhost/items/2')))!.text()).toContain('<h1>Item 2</h1>');
+  });
+
+  it('re-expands parameters before each run, adding and dropping instances', async () => {
+    engine.injector.get(Feed).itemIds.set(['2', '3']);
+
+    await engine.refresh('params changed', ['/about']);
+
+    expect((await engine.snapshots()).map((snapshot) => snapshot.path).sort()).toEqual([
+      '/',
+      '/about',
+      '/items/2',
+      '/items/3',
+    ]);
+    expect(await (await engine.handle(new Request('http://localhost/items/3')))!.text()).toContain('<h1>Item 3</h1>');
+    engine.injector.get(Feed).itemIds.set(['1', '2']);
+    await engine.refresh('restore');
   });
 
   it('answers requests for snapshot paths with hydration-ready HTML and cache headers', async () => {
@@ -95,7 +132,7 @@ describe('ContinuousAppEngine', () => {
     const etag = (await engine.handle(new Request('http://localhost/about')))!.headers.get('etag')!;
 
     expect((await engine.handle(new Request('http://localhost/about', { headers: { 'if-none-match': etag } })))?.status).toBe(304);
-    expect(await engine.handle(new Request('http://localhost/items/1'))).toBeNull();
+    expect(await engine.handle(new Request('http://localhost/items/9'))).toBeNull();
     expect(await engine.handle(new Request('http://localhost/', { method: 'POST' }))).toBeNull();
   });
 
@@ -118,7 +155,7 @@ describe('ContinuousAppEngine', () => {
     expect(health.role).toBe('render');
     expect(health.instance).toMatchObject({ renders: expect.any(Number), recycles: 0, recycling: false });
     expect(health.lastRun?.failed).toEqual([]);
-    expect(health.snapshots.map((s) => s.path).sort()).toEqual(['/', '/about']);
+    expect(health.snapshots.map((s) => s.path).sort()).toEqual(['/', '/about', '/items/1', '/items/2']);
     expect(prepared).toEqual(['first']);
   });
 
@@ -164,7 +201,7 @@ describe('ContinuousAppEngine', () => {
     });
 
     try {
-      expect(stored.sort()).toEqual(['/', '/about']);
+      expect(stored.sort()).toEqual(['/', '/about', '/items/1', '/items/2']);
       expect(server.role).toBe('serve');
       expect((await server.handle(new Request('http://localhost/about')))?.status).toBe(200);
       expect(() => server.injector).toThrow();

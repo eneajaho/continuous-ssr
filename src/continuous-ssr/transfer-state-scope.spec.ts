@@ -84,6 +84,20 @@ describe('TransferStateScope', () => {
     expect(Object.keys(store).sort()).toEqual(['b-data', 'live-state']);
   });
 
+  it('forgets a route, removing keys only it owned', () => {
+    const store: Record<string, unknown> = { 'a-only': 1, both: 2, 'b-only': 3 };
+    scope.attribute(store, {}, '/a');
+    scope.attribute(store, { 'a-only': 1, both: 1 }, '/b');
+    store['both'] = 2;
+
+    const removed = scope.forget(store, '/a');
+
+    expect(removed).toEqual(['a-only']);
+    expect(Object.keys(store).sort()).toEqual(['b-only', 'both']);
+    expect(scope.ownersOf('both')).toEqual(['/b']);
+    expect(scope.ownersOf('a-only')).toEqual([]);
+  });
+
   it('reads the raw store of a real TransferState', () => {
     const state = TestBed.inject(TransferState);
     state.set(makeStateKey<string>('k'), 'v');

@@ -6,6 +6,7 @@ import {
   PlatformRef,
   StaticProvider,
   TransferState,
+  runInInjectionContext,
 } from '@angular/core';
 import type { BootstrapContext } from '@angular/platform-browser';
 import {
@@ -145,6 +146,45 @@ export class ContinuousRenderer {
     return run;
   }
 
+  /** Drops the transfer state a route owned once it is no longer snapshotted. */
+  forgetRoute(url: string): void {
+    const transferState = this.appRef.injector.get(TransferState, null);
+    if (!transferState) {
+      return;
+    }
+    const removed = this.scope.forget(storeOf(transferState), this.routeOf(url));
+    if (removed.length) {
+      this.log.debug('transfer state of dropped route removed', { route: url, keys: removed.join(',') });
+    }
+  }
+
+  /**
+   * Runs `fn` in the live application's injection context and discards whatever it wrote to
+   * `TransferState`, for bookkeeping work (like listing route parameters) that must not end
+   * up in a snapshot.
+   */
+  async withoutTransferState<T>(fn: () => Promise<T> | T): Promise<T> {
+    const transferState = this.appRef.injector.get(TransferState, null);
+    const store = transferState ? storeOf(transferState) : undefined;
+    const before = store ? this.scope.capture(store) : {};
+    try {
+      return await runInInjectionContext(this.appRef.injector, fn);
+    } finally {
+      if (store) {
+        for (const key of Object.keys(store)) {
+          if (!Object.hasOwn(before, key)) {
+            delete store[key];
+          }
+        }
+      }
+    }
+  }
+
+  private routeOf(url: string): string {
+    const target = new URL(url, this.origin);
+    return `${target.pathname}${target.search}${target.hash}`;
+  }
+
   destroy(): void {
     if (!this.platformRef.destroyed) {
       this.log.info('destroying platform', { renders: this.renders });
@@ -162,8 +202,7 @@ export class ContinuousRenderer {
     const router = injector.get(Router, null);
     const transferState = injector.get(TransferState, null);
     const store = transferState ? storeOf(transferState) : undefined;
-    const target = new URL(url, this.origin);
-    const route = `${target.pathname}${target.search}${target.hash}`;
+    const route = this.routeOf(url);
     let navigation: string | undefined;
     let evicted: string[] = [];
     let before: TransferStateStore = {};

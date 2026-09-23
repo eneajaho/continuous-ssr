@@ -52,6 +52,27 @@ export class TransferStateScope {
     return evicted;
   }
 
+  /**
+   * Drops everything known about `route`: its ownership records, and the keys nobody else
+   * owns are removed from the store. For routes that stopped being snapshotted.
+   */
+  forget(store: TransferStateStore, route: string): string[] {
+    const removed: string[] = [];
+    for (const [key, owners] of this.owners) {
+      if (!owners.delete(route)) {
+        continue;
+      }
+      if (owners.size === 0) {
+        this.owners.delete(key);
+        if (!this.isShared(key) && Object.hasOwn(store, key)) {
+          delete store[key];
+          removed.push(key);
+        }
+      }
+    }
+    return removed;
+  }
+
   /** A shallow copy of the store, to diff against after the route has rendered. */
   capture(store: TransferStateStore): TransferStateStore {
     return { ...store };

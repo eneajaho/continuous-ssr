@@ -1,6 +1,7 @@
 import { DatePipe } from '@angular/common';
 import { httpResource } from '@angular/common/http';
 import { Component } from '@angular/core';
+import { RouterLink } from '@angular/router';
 
 export interface NewsItem {
   readonly id: number;
@@ -17,7 +18,7 @@ export interface NewsFeed {
 
 @Component({
   selector: 'app-news',
-  imports: [DatePipe],
+  imports: [DatePipe, RouterLink],
   template: `
     <section class="space-y-6">
       <div>
@@ -41,7 +42,12 @@ export interface NewsFeed {
           @for (item of feed.value().items; track item.id) {
             <li class="flex flex-col gap-1 rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <h2 class="font-medium text-zinc-900 dark:text-zinc-50" style="overflow-wrap: anywhere">
-                {{ item.title }}
+                <a
+                  [routerLink]="['/news', item.id]"
+                  class="rounded-md hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
+                >
+                  {{ item.title }}
+                </a>
               </h2>
               <p class="text-sm text-zinc-600 dark:text-zinc-400">{{ item.summary }}</p>
             </li>

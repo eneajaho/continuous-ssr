@@ -1,12 +1,11 @@
 import { ApplicationRef, EnvironmentInjector } from '@angular/core';
-import { Router } from '@angular/router';
 import { ɵInlineCriticalCssProcessor as InlineCriticalCssProcessor } from '@angular/ssr';
 import type { Subscription } from 'rxjs';
 import {
   CONTINUOUS_RENDERING_OPTIONS,
   ContinuousRenderingOptions,
   RecyclePolicy,
-  discoverStaticRoutes,
+  resolveSnapshotRoutes,
 } from './config';
 import { Logger, NOOP_LOGGER, ms } from './log';
 import { RenderLoop, RenderRunStats } from './render-loop';
@@ -257,11 +256,12 @@ export class ContinuousAppEngine {
     });
 
     const config = renderer.injector.get(CONTINUOUS_RENDERING_OPTIONS, null) ?? {};
-    const routes =
-      config.routes ?? discoverStaticRoutes(renderer.injector.get(Router, null)?.config ?? []);
+    const routes = () =>
+      resolveSnapshotRoutes(renderer.injector, config, (fn) => renderer.withoutTransferState(fn));
     log.info('continuous rendering configured', {
-      routes: routes.join(','),
-      source: config.routes ? 'options' : 'router',
+      routes: (await routes()).join(','),
+      discover: config.discoverRoutes ?? true,
+      explicit: (config.routes ?? []).length,
       autoRefresh: config.autoRefresh ?? true,
       store: store.constructor.name,
     });
@@ -285,6 +285,7 @@ export class ContinuousAppEngine {
       initialVersion,
       postProcess: criticalCss ? (html) => criticalCss.process(html) : undefined,
       onSnapshotStored: options.onSnapshotStored,
+      onRoutesDropped: (paths) => paths.forEach((path) => renderer.forgetRoute(path)),
       onRunFinished: () => this.checkRecyclePolicy(config.recycle),
       log: log.child('loop'),
     });

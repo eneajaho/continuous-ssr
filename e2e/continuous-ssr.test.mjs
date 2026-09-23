@@ -229,3 +229,21 @@ test('reports health and survives a recycle without losing snapshots or state', 
   await fetch(`${BASE}/api/increment`, { method: 'POST' });
   await waitFor(async () => (await state()).version > version, { label: 'a run after recycle' });
 });
+
+test('parameterised routes get one snapshot per instance with their own transfer state', async () => {
+  const response = await fetch(`${BASE}/news/2`);
+  const html = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('x-ssr-mode'), 'continuous');
+  assert.ok(html.includes('<app-news-article'));
+  assert.ok(html.includes('Live application stays warm'));
+
+  const entries = httpCacheEntries(transferState(html));
+  assert.equal(entries.length, 1, 'only the article response, not the feed the params came from');
+  assert.match(entries[0][1].u, /\/api\/news\/2$/);
+
+  const snapshots = (await state()).snapshots.map((s) => s.path);
+  assert.deepEqual(snapshots.filter((p) => p.startsWith('/news/')).sort(), ['/news/1', '/news/2', '/news/3']);
+  assert.equal((await fetch(`${BASE}/news/999`)).headers.get('x-ssr-mode'), 'per-request');
+});
