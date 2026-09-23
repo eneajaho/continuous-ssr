@@ -10,6 +10,6 @@ export default bootstrap;
  * The server entry loads this bundle at runtime and starts the engine from it, so the engine
  * shares this bundle's copy of Angular with the per-request renderer.
  */
-export { ContinuousAppEngine } from './continuous-ssr';
+export * from './continuous-ssr/server';
 /** Demo only: lets the API endpoints in `server.ts` mutate the live state. */
 export { LiveDataStore } from './app/live-data.store';

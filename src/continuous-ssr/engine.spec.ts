@@ -5,6 +5,7 @@ import { RouterOutlet, provideRouter } from '@angular/router';
 import { provideContinuousRendering } from './config';
 import { ContinuousAppEngine } from './engine';
 import { sharedState } from './shared-state';
+import { MemorySnapshotStore } from './snapshot-store';
 
 @Service()
 class Feed {
@@ -69,13 +70,14 @@ describe('ContinuousAppEngine', () => {
     engine.stop();
   });
 
-  it('discovers static routes from the router config and warms them up', () => {
-    expect(engine.snapshots.map((snapshot) => snapshot.path).sort()).toEqual(['/', '/about']);
+
+  it('discovers static routes from the router config and warms them up', async () => {
+    expect((await engine.snapshots()).map((snapshot) => snapshot.path).sort()).toEqual(['/', '/about']);
     expect(engine.version).toBe(1);
   });
 
   it('answers requests for snapshot paths with hydration-ready HTML and cache headers', async () => {
-    const response = engine.handle(new Request('http://localhost/'));
+    const response = await engine.handle(new Request('http://localhost/'));
 
     expect(response?.status).toBe(200);
     expect(response?.headers.get('x-ssr-mode')).toBe('continuous');
@@ -85,12 +87,12 @@ describe('ContinuousAppEngine', () => {
     expect(html).toMatch(/ngh="\d+"/);
   });
 
-  it('answers conditional requests with 304 and ignores non-snapshot paths and methods', () => {
-    const etag = engine.handle(new Request('http://localhost/about'))!.headers.get('etag')!;
+  it('answers conditional requests with 304 and ignores non-snapshot paths and methods', async () => {
+    const etag = (await engine.handle(new Request('http://localhost/about')))!.headers.get('etag')!;
 
-    expect(engine.handle(new Request('http://localhost/about', { headers: { 'if-none-match': etag } }))?.status).toBe(304);
-    expect(engine.handle(new Request('http://localhost/items/1'))).toBeNull();
-    expect(engine.handle(new Request('http://localhost/', { method: 'POST' }))).toBeNull();
+    expect((await engine.handle(new Request('http://localhost/about', { headers: { 'if-none-match': etag } })))?.status).toBe(304);
+    expect(await engine.handle(new Request('http://localhost/items/1'))).toBeNull();
+    expect(await engine.handle(new Request('http://localhost/', { method: 'POST' }))).toBeNull();
   });
 
   it('re-renders on its own when shared state changes, whichever route is active', async () => {
@@ -100,8 +102,41 @@ describe('ContinuousAppEngine', () => {
     engine.injector.get(Feed).headline.set('second');
     await until(() => engine.version > before);
 
-    const html = await engine.handle(new Request('http://localhost/'))!.text();
+    const html = await (await engine.handle(new Request('http://localhost/')))!.text();
     expect(html).toContain('<h1>second</h1>');
     expect(html).toContain('"headline":"second"');
+  });
+
+  it('shares its store with a serve-only engine and notifies stored snapshots', async () => {
+    const stored: string[] = [];
+    const store = new MemorySnapshotStore();
+    engine.stop();
+    const renderer = await ContinuousAppEngine.start({
+      bootstrap,
+      document: DOCUMENT_TEMPLATE,
+      origin: 'http://localhost',
+      store,
+      onSnapshotStored: (snapshot) => {
+        stored.push(snapshot.path);
+      },
+    });
+    const server = await ContinuousAppEngine.start({
+      bootstrap,
+      document: DOCUMENT_TEMPLATE,
+      origin: 'http://localhost',
+      role: 'serve',
+      store,
+    });
+
+    try {
+      expect(stored.sort()).toEqual(['/', '/about']);
+      expect(server.role).toBe('serve');
+      expect((await server.handle(new Request('http://localhost/about')))?.status).toBe(200);
+      expect(() => server.injector).toThrow();
+      await expect(server.refresh()).rejects.toThrow();
+    } finally {
+      server.stop();
+      renderer.stop();
+    }
   });
 });

@@ -10,8 +10,9 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LiveDataStore } from './app/live-data.store';
-import { createLogger, isLogLevel, ms, type ContinuousAppEngine } from './continuous-ssr';
 import type { ContinuousBootstrap } from './continuous-ssr/renderer';
+import type { ContinuousAppEngine, FileSnapshotStore, SnapshotStore } from './continuous-ssr/server';
+import { createLogger, isLogLevel, ms } from './continuous-ssr/log';
 
 const serverDistFolder = import.meta.dirname;
 const browserDistFolder = join(serverDistFolder, '../browser');
@@ -28,6 +29,10 @@ const ALLOWED_HOSTS = (process.env['ALLOWED_HOSTS'] ?? 'localhost')
 const LOG_LEVEL = isLogLevel(process.env['SSR_LOG']) ? process.env['SSR_LOG'] : 'info';
 /** Demo ticker that mutates state on the server. `0` disables it. */
 const TICK_MS = Number(process.env['TICK_MS'] ?? 5000);
+/** `render` keeps snapshots fresh; `serve` only answers from a store another instance fills. */
+const SSR_ROLE = process.env['SSR_ROLE'] === 'serve' ? 'serve' : 'render';
+/** `memory` (default) or `file:<directory>` for a store shared with other processes or a CDN origin. */
+const SNAPSHOT_STORE = process.env['SNAPSHOT_STORE'] ?? 'memory';
 const MAX_MESSAGE_LENGTH = 120;
 
 const log = createLogger('ssr', LOG_LEVEL);
@@ -41,7 +46,15 @@ let liveStore: LiveDataStore | undefined;
 interface ServerEntry {
   readonly default: ContinuousBootstrap;
   readonly ContinuousAppEngine: typeof ContinuousAppEngine;
+  readonly FileSnapshotStore: typeof FileSnapshotStore;
   readonly LiveDataStore: typeof LiveDataStore;
+}
+
+function createSnapshotStore(entry: ServerEntry): SnapshotStore | undefined {
+  if (SNAPSHOT_STORE.startsWith('file:')) {
+    return new entry.FileSnapshotStore(SNAPSHOT_STORE.slice('file:'.length));
+  }
+  return undefined;
 }
 
 /**
@@ -68,9 +81,15 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
     bootstrap: entry.default,
     document,
     origin: ORIGIN,
+    role: SSR_ROLE,
+    store: createSnapshotStore(entry),
     readBrowserAsset: (fileName) => readFile(join(browserDistFolder, fileName), 'utf8'),
     log,
   });
+  continuous = engine;
+  if (engine.role === 'serve') {
+    return engine;
+  }
 
   // Demo: seed the live state and keep it moving. A real app's services would fetch their
   // own data here; every change they make re-renders the snapshots automatically.
@@ -84,19 +103,19 @@ async function startContinuousRendering(): Promise<ContinuousAppEngine | undefin
   }
 
   liveStore = store;
-  continuous = engine;
   return engine;
 }
 
 /**
  * Demo API. Mutating the store is all it takes; the engine notices the change and re-renders.
  */
-app.get('/api/state', (_req, res) => {
+app.get('/api/state', async (_req, res) => {
   res.json({
     continuous: continuous !== undefined,
+    role: continuous?.role ?? null,
     version: continuous?.version ?? 0,
     state: liveStore?.snapshot() ?? null,
-    snapshots: continuous?.snapshots ?? [],
+    snapshots: (await continuous?.snapshots()) ?? [],
   });
 });
 
@@ -158,8 +177,8 @@ app.use(
 /**
  * Snapshots first, then Angular's per-request engine for everything else.
  */
-app.use((req, res, next) => {
-  const response = continuous?.handle(createWebRequestFromNodeRequest(req));
+app.use(async (req, res, next) => {
+  const response = await continuous?.handle(createWebRequestFromNodeRequest(req)).catch(next);
   if (response) {
     writeResponseToNodeResponse(response, res).catch(next);
     return;
